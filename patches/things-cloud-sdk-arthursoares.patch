@@ -1,0 +1,3625 @@
+diff --git a/cmd/things-cli/main.go b/cmd/things-cli/main.go
+index b8761a6..0d79999 100644
+--- a/cmd/things-cli/main.go
++++ b/cmd/things-cli/main.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"bytes"
+ 	"encoding/json"
+ 	"fmt"
+ 	"hash/crc32"
+@@ -199,7 +200,7 @@ func validateEditContainers(area, project, heading string) error {
+ // Things identifier, for the same reason as validateIdentifierOpts.
+ func validateBatchOpIdentifiers(op BatchOp) error {
+ 	check := map[string]string{
+-		"uuid": op.UUID, "project": op.Project, "area": op.Area, "heading": op.Heading,
++		"uuid": op.UUID, "project": op.Project, "area": op.Area, "heading": op.Heading, "task": op.Task,
+ 	}
+ 	for name, v := range check {
+ 		if v == "" {
+@@ -264,11 +265,17 @@ func hasExplicitSchedule(opts map[string]string) bool {
+ }
+ 
+ func fatal(op string, err error) {
++	if serving {
++		panic(serveFailure(fmt.Sprintf("%s: %v", op, err)))
++	}
+ 	fmt.Fprintf(os.Stderr, "%s: %v\n", op, err)
+ 	os.Exit(1)
+ }
+ 
+ func fatalf(format string, args ...any) {
++	if serving {
++		panic(serveFailure(fmt.Sprintf(format, args...)))
++	}
+ 	fmt.Fprintf(os.Stderr, format+"\n", args...)
+ 	os.Exit(1)
+ }
+@@ -288,7 +295,7 @@ func requireEnv(key string) string {
+ }
+ 
+ func outputJSON(v any) {
+-	enc := json.NewEncoder(os.Stdout)
++	enc := json.NewEncoder(outputWriter())
+ 	enc.SetIndent("", "  ")
+ 	if err := enc.Encode(v); err != nil {
+ 		fatal("write output", err)
+@@ -692,10 +699,26 @@ func (ctx *cliContext) serverIndex() int {
+ 
+ func (ctx *cliContext) loadState() *memory.State {
+ 	cachePath := cliStateCachePath()
+-	cache, previous, err := loadCLIStateCacheSnapshot(cachePath)
++	var cache *cliStateCache
++	var previous []byte
++	var err error
++	if serving {
++		// Serve mode keeps the state in memory while the file is unchanged.
++		previous, err = readCLIStateCacheFile(cachePath)
++		if err == nil && serveState != nil && previous != nil && bytes.Equal(previous, serveSnapshot) {
++			cache = serveState
++		} else if err == nil {
++			cache, previous, err = loadCLIStateCacheSnapshot(cachePath)
++		}
++	} else {
++		cache, previous, err = loadCLIStateCacheSnapshot(cachePath)
++	}
+ 	if err != nil {
+ 		fatal("load state cache", err)
+ 	}
++	if serving && serveOffline && cache != nil && cache == serveState && cache.HistoryID == ctx.history.ID {
++		return cache.State
++	}
+ 
+ 	state := memory.NewState()
+ 	startIndex := 0
+@@ -731,13 +754,26 @@ func (ctx *cliContext) loadState() *memory.State {
+ 		}
+ 	}
+ 
+-	if err := saveCLIStateCacheSnapshot(cachePath, &cliStateCache{
++	loaded := cache != nil && cache.HistoryID == ctx.history.ID
++	if serving && loaded && cache.ServerIndex == startIndex && cache.State == state {
++		// Nothing new: the file already holds this state.
++		serveState, serveSnapshot = cache, previous
++		return state
++	}
++	saved := &cliStateCache{
+ 		HistoryID:   ctx.history.ID,
+ 		ServerIndex: startIndex,
+ 		State:       state,
+-	}, previous); err != nil {
++	}
++	if err := saveCLIStateCacheSnapshot(cachePath, saved, previous); err != nil {
+ 		fatal("save state cache", err)
+ 	}
++	if serving {
++		serveState, serveSnapshot = saved, nil
++		if data, err := readCLIStateCacheFile(cachePath); err == nil {
++			serveSnapshot = data
++		}
++	}
+ 
+ 	return state
+ }
+@@ -784,26 +820,23 @@ func taskToOutput(t *thingscloud.Task) TaskOutput {
+ 	return out
+ }
+ 
+-func sameDay(a, b time.Time) bool {
+-	ay, am, ad := a.Date()
+-	by, bm, bd := b.Date()
+-	return ay == by && am == bm && ad == bd
+-}
+-
+ func listTasks(state *memory.State, opts map[string]string) []TaskOutput {
+-	now := time.Now().UTC()
++	// Things stores start dates as midnight UTC of the user's local calendar
++	// day, so compare against the local date.
++	now := time.Now()
+ 	tomorrowStart := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+ 	searchQuery := strings.ToLower(strings.TrimSpace(opts["search"]))
+ 
+ 	var tasks []TaskOutput
+ 	for _, task := range state.Tasks {
+-		if task.InTrash || task.Status == 3 || task.Type == thingscloud.TaskTypeProject {
++		if task.InTrash || task.Status == thingscloud.TaskStatusCompleted || task.Status == thingscloud.TaskStatusCanceled || task.Type == thingscloud.TaskTypeProject {
+ 			continue
+ 		}
+ 
+ 		// Filters
+ 		if _, ok := opts["today"]; ok {
+-			if task.Schedule != thingscloud.TaskScheduleAnytime || task.ScheduledDate == nil || !sameDay(*task.ScheduledDate, now) {
++			// Today also shows tasks whose start date has passed.
++			if task.Schedule != thingscloud.TaskScheduleAnytime || task.ScheduledDate == nil || !task.ScheduledDate.Before(tomorrowStart) {
+ 				continue
+ 			}
+ 		}
+@@ -1254,12 +1287,30 @@ type BatchOp struct {
+ 	Tags     []string          `json:"tags,omitempty"`
+ 	Type     string            `json:"type,omitempty"`
+ 	Extra    map[string]string `json:"extra,omitempty"` // supported create options; overrides top-level values
++	// reorder: the position in projects, headings and lists (ix), and in
++	// Today (ti, with tir as the day the to-do entered Today).
++	Index      *int   `json:"index,omitempty"`
++	TodayIndex *int   `json:"todayIndex,omitempty"`
++	TodayDate  string `json:"todayDate,omitempty"`
++	// checklist-*: the to-do a new checklist item belongs to, and whether an
++	// item is done.
++	Task string `json:"task,omitempty"`
++	Done *bool  `json:"done,omitempty"`
++	// schedule: a start date (YYYY-MM-DD); deadline: a date, or "" to remove.
++	// (Top-level "scheduled" stays unknown: create takes it in extra.)
++	StartDate   string  `json:"startDate,omitempty"`
++	DeadlineSet *string `json:"deadlineDate,omitempty"`
++	// reminder: the time of day (HH:MM), or "" to remove; with a time, also
++	// the start date it rings on (YYYY-MM-DD).
++	Time *string `json:"time,omitempty"`
++	// create: makes the to-do a repeating template.
++	Repeat *RepeatSpec `json:"repeat,omitempty"`
+ }
+ 
+ func cmdBatch(history *thingscloud.History) {
+ 	// Read JSON from stdin
+ 	var ops []BatchOp
+-	decoder := json.NewDecoder(os.Stdin)
++	decoder := json.NewDecoder(inputReader())
+ 	decoder.DisallowUnknownFields()
+ 	if err := decoder.Decode(&ops); err != nil {
+ 		fatalf("parsing batch JSON: %v", err)
+@@ -1299,7 +1350,7 @@ func cmdBatch(history *thingscloud.History) {
+ }
+ 
+ func buildBatchEnvelope(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
+-	if op.Cmd != "create" && op.Extra != nil {
++	if op.Cmd != "create" && (op.Extra != nil || op.Repeat != nil) {
+ 		return nil, nil, fmt.Errorf("extra options are only supported for create")
+ 	}
+ 	switch op.Cmd {
+@@ -1307,10 +1358,14 @@ func buildBatchEnvelope(op BatchOp) (thingscloud.Identifiable, map[string]string
+ 		return buildBatchCreate(op)
+ 	case "complete":
+ 		return buildBatchComplete(op)
++	case "cancel":
++		return buildBatchCancel(op)
+ 	case "trash":
+ 		return buildBatchTrash(op)
+ 	case "purge":
+ 		return buildBatchPurge(op)
++	case "delete":
++		return buildBatchDelete(op)
+ 	case "move-to-today":
+ 		return buildBatchMoveToToday(op)
+ 	case "move-to-project":
+@@ -1319,6 +1374,44 @@ func buildBatchEnvelope(op BatchOp) (thingscloud.Identifiable, map[string]string
+ 		return buildBatchMoveToArea(op)
+ 	case "edit":
+ 		return buildBatchEdit(op)
++	case "reorder":
++		return buildBatchReorder(op)
++	case "restore":
++		return buildBatchRestore(op)
++	case "reopen":
++		return buildBatchReopen(op)
++	case "move":
++		return buildBatchMove(op)
++	case "unfile":
++		return buildBatchUnfile(op)
++	case "schedule":
++		return buildBatchSchedule(op)
++	case "deadline":
++		return buildBatchDeadline(op)
++	case "tags":
++		return buildBatchTags(op)
++	case "reminder":
++		return buildBatchReminder(op)
++	case "area-reorder":
++		return buildBatchAreaReorder(op)
++	case "area-rename":
++		return buildBatchAreaRename(op)
++	case "area-tags":
++		return buildBatchAreaTags(op)
++	case "area-delete":
++		return buildBatchAreaDelete(op)
++	case "tag-rename":
++		return buildBatchTagRename(op)
++	case "tag-delete":
++		return buildBatchTagDelete(op)
++	case "log-completed":
++		return buildBatchLogCompleted(op)
++	case "checklist-add":
++		return buildBatchChecklistAdd(op)
++	case "checklist-edit", "checklist-complete", "checklist-reorder":
++		return buildBatchChecklistChange(op)
++	case "checklist-delete":
++		return buildBatchChecklistDelete(op)
+ 	default:
+ 		return nil, nil, fmt.Errorf("unknown command: %s", op.Cmd)
+ 	}
+@@ -1375,7 +1468,27 @@ func buildBatchCreate(op BatchOp) (thingscloud.Identifiable, map[string]string,
+ 		return nil, nil, err
+ 	}
+ 
++	if op.Index != nil || op.TodayIndex != nil {
++		// Task7 creates are verified with ix and ti 0; move it afterwards.
++		return nil, nil, fmt.Errorf("create takes no position; reorder it after creating")
++	}
+ 	payload := newTaskCreatePayload(op.Title, opts)
++	if op.Repeat != nil {
++		// A template: Things files it under Someday without a start date
++		// and creates its to-dos from icsd, the first day, on.
++		if opts["type"] != "" && opts["type"] != "task" {
++			return nil, nil, fmt.Errorf("only to-dos can repeat")
++		}
++		if opts["when"] != "" || opts["scheduled"] != "" {
++			return nil, nil, fmt.Errorf("a repeating to-do takes its start from repeat")
++		}
++		rule, first, err := repeatRule(*op.Repeat, time.Now())
++		if err != nil {
++			return nil, nil, err
++		}
++		raw := json.RawMessage(rule)
++		payload.Rr, payload.Icsd, payload.St, payload.Sr, payload.Tir = &raw, &first, 2, nil, nil
++	}
+ 	env := writeEnvelope{id: taskUUID, action: 0, kind: task7WriteKind, payload: payload}
+ 
+ 	return env, map[string]string{"cmd": "create", "uuid": taskUUID, "title": op.Title}, nil
+@@ -1393,6 +1506,356 @@ func buildBatchComplete(op BatchOp) (thingscloud.Identifiable, map[string]string
+ 	return env, map[string]string{"cmd": "complete", "uuid": op.UUID}, nil
+ }
+ 
++// buildBatchCancel cancels a to-do as Things does: ss 2 with the time (sp).
++// It stays in its list until "Log Completed"; reopen undoes it.
++func buildBatchCancel(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("cancel requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate().Status(2).StopDate(nowTs())
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "cancel", "uuid": op.UUID}, nil
++}
++
++// buildBatchRestore takes a to-do out of the Trash (tr false), as Things does.
++func buildBatchRestore(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("restore requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate().Trash(false)
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "restore", "uuid": op.UUID}, nil
++}
++
++// buildBatchReopen marks a completed to-do open again (ss 0, sp null).
++func buildBatchReopen(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("reopen requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate().Status(0)
++	u.fields["sp"] = nil
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "reopen", "uuid": op.UUID}, nil
++}
++
++// buildBatchMove puts a to-do into a project or area and leaves its schedule
++// alone, as Things does when a to-do is dragged onto a project (it writes pr,
++// ar and agr only). move-to-project and move-to-area also make it Anytime.
++func buildBatchMove(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	targets := 0
++	for _, target := range []string{op.Project, op.Area, op.Heading} {
++		if target != "" {
++			targets++
++		}
++	}
++	if op.UUID == "" || targets != 1 {
++		return nil, nil, fmt.Errorf("move requires uuid and one of project, area or heading")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate()
++	switch {
++	case op.Project != "":
++		u.Project(op.Project)
++	case op.Area != "":
++		u.Area(op.Area)
++	default:
++		// Under a heading the project comes from the heading: Things writes
++		// agr with empty pr and ar.
++		u.Heading(op.Heading)
++		u.fields["pr"] = []string{}
++		u.fields["ar"] = []string{}
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "move", "uuid": op.UUID}, nil
++}
++
++// buildBatchUnfile takes a to-do or project out of its project, heading and
++// area (pr, ar and agr empty), e.g. a project dragged to the top of the
++// sidebar.
++func buildBatchUnfile(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("unfile requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate()
++	u.fields["pr"], u.fields["ar"], u.fields["agr"] = []string{}, []string{}, []string{}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "unfile", "uuid": op.UUID}, nil
++}
++
++// buildBatchSchedule sets when a to-do is due: a list (today, evening,
++// anytime, someday, inbox) or a start date. It writes st, sr and tir
++// together, as Things does, and sb: 1 for This Evening (Today with sb 1),
++// 0 for everything else, so a to-do leaves This Evening when it moves.
++func buildBatchSchedule(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" || (op.When == "") == (op.StartDate == "") {
++		return nil, nil, fmt.Errorf("schedule requires uuid and either when or startDate")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate()
++	u.fields["sb"] = 0
++	switch op.When {
++	case "today":
++		u.Today()
++	case "evening":
++		u.Today()
++		u.fields["sb"] = 1
++	case "anytime":
++		u.Anytime()
++	case "someday":
++		u.Someday()
++	case "inbox":
++		u.Inbox()
++	case "":
++		t := parseDate(op.StartDate)
++		if t == nil {
++			return nil, nil, fmt.Errorf("invalid start date %q", op.StartDate)
++		}
++		u.ScheduleDate(t.Unix())
++	default:
++		return nil, nil, fmt.Errorf("unsupported when %q", op.When)
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "schedule", "uuid": op.UUID}, nil
++}
++
++// buildBatchDeadline sets (dd) or removes (dd null) a deadline; Things
++// writes dd alone.
++func buildBatchDeadline(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" || op.DeadlineSet == nil {
++		return nil, nil, fmt.Errorf("deadline requires uuid and deadlineDate")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate()
++	if *op.DeadlineSet == "" {
++		u.fields["dd"] = nil
++	} else {
++		t := parseDate(*op.DeadlineSet)
++		if t == nil {
++			return nil, nil, fmt.Errorf("invalid deadline %q", *op.DeadlineSet)
++		}
++		u.Deadline(t.Unix())
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "deadline", "uuid": op.UUID}, nil
++}
++
++// buildBatchReminder sets a reminder as Things writes it: ato, the seconds
++// after midnight, with the start date it rings on ({md, ato, st, sr, tir});
++// an empty time removes it (ato null).
++func buildBatchReminder(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" || op.Time == nil {
++		return nil, nil, fmt.Errorf("reminder requires uuid and time")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	u := newTaskUpdate()
++	if *op.Time == "" {
++		u.fields["ato"] = nil
++	} else {
++		clock, err := time.Parse("15:04", *op.Time)
++		if err != nil {
++			return nil, nil, fmt.Errorf("invalid reminder time %q", *op.Time)
++		}
++		day := parseDate(op.StartDate)
++		if day == nil {
++			return nil, nil, fmt.Errorf("a reminder needs a start date")
++		}
++		u.ScheduleDate(day.Unix())
++		u.fields["ato"] = clock.Hour()*3600 + clock.Minute()*60
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "reminder", "uuid": op.UUID}, nil
++}
++
++// buildBatchTags replaces a to-do's tags (tg); an empty list removes them.
++func buildBatchTags(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("tags requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	tags := op.Tags
++	if tags == nil {
++		tags = []string{}
++	}
++	u := newTaskUpdate().Tags(tags)
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "tags", "uuid": op.UUID}, nil
++}
++
++// buildBatchAreaReorder moves an area in the sidebar (ix of Area3).
++func buildBatchAreaReorder(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" || op.Index == nil {
++		return nil, nil, fmt.Errorf("area-reorder requires uuid and index")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: "Area3", payload: map[string]any{"ix": *op.Index}}
++	return env, map[string]string{"cmd": "area-reorder", "uuid": op.UUID}, nil
++}
++
++// buildBatchAreaRename changes an area's title (tt).
++func buildBatchAreaRename(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	title := strings.TrimSpace(op.Title)
++	if op.UUID == "" || title == "" {
++		return nil, nil, fmt.Errorf("area-rename requires uuid and title")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: "Area3", payload: map[string]any{"tt": title}}
++	return env, map[string]string{"cmd": "area-rename", "uuid": op.UUID}, nil
++}
++
++// buildBatchAreaTags replaces an area's tags (tg of Area3, as Things writes
++// it); an empty list removes them.
++func buildBatchAreaTags(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("area-tags requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	tags := op.Tags
++	if tags == nil {
++		tags = []string{}
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: "Area3", payload: map[string]any{"tg": tags}}
++	return env, map[string]string{"cmd": "area-tags", "uuid": op.UUID}, nil
++}
++
++// buildBatchAreaDelete deletes an area for good: Area3 action 2 with an empty
++// payload, as Things writes it. Its projects and to-dos must be trashed first
++// (the app does that in the same batch).
++func buildBatchAreaDelete(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("area-delete requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 2, kind: "Area3", payload: map[string]any{}}
++	return env, map[string]string{"cmd": "area-delete", "uuid": op.UUID}, nil
++}
++
++// settingsID is the identifier of the account settings: the base58 form of
++// the legacy identifier "Settings".
++const settingsID = "RhAzEf6qDxCD5PmnZVtBZR"
++
++// buildBatchLogCompleted moves completed to-dos to the Logbook the way
++// Things' "Log Completed" does: it sets the settings' log date (ld) to now.
++func buildBatchLogCompleted(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID != "" {
++		return nil, nil, fmt.Errorf("log-completed takes no uuid")
++	}
++	env := writeEnvelope{id: settingsID, action: 1, kind: "Settings5", payload: map[string]any{"ld": nowTs()}}
++	return env, map[string]string{"cmd": "log-completed"}, nil
++}
++
++const checklistKind = "ChecklistItem3"
++
++// buildBatchChecklistAdd creates a checklist item in a to-do, like
++// add-checklist, at an optional position.
++func buildBatchChecklistAdd(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.Task == "" || strings.TrimSpace(op.Title) == "" {
++		return nil, nil, fmt.Errorf("checklist-add requires task and title")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	itemUUID := op.UUID
++	if itemUUID == "" {
++		itemUUID = generateUUID()
++	}
++	index := 0
++	if op.Index != nil {
++		index = *op.Index
++	}
++	payload := ChecklistItemCreatePayload{
++		Cd: nowTs(),
++		Md: nil,
++		Tt: strings.TrimSpace(op.Title),
++		Ss: 0,
++		Sp: nil,
++		Ix: index,
++		Ts: []string{op.Task},
++		Lt: false,
++		Xx: defaultExtension(),
++	}
++	env := writeEnvelope{id: itemUUID, action: 0, kind: checklistKind, payload: payload}
++	return env, map[string]string{"cmd": "checklist-add", "uuid": itemUUID, "task": op.Task}, nil
++}
++
++// buildBatchChecklistChange renames (md, tt), checks off (md, ss, sp) or
++// moves (md, ix) a checklist item, matching what Things writes.
++func buildBatchChecklistChange(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("%s requires uuid", op.Cmd)
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	now := nowTs()
++	fields := map[string]any{"md": now}
++	switch op.Cmd {
++	case "checklist-edit":
++		if strings.TrimSpace(op.Title) == "" {
++			return nil, nil, fmt.Errorf("checklist-edit requires title")
++		}
++		fields["tt"] = strings.TrimSpace(op.Title)
++	case "checklist-complete":
++		if op.Done == nil {
++			return nil, nil, fmt.Errorf("checklist-complete requires done")
++		}
++		if *op.Done {
++			fields["ss"], fields["sp"] = 3, now
++		} else {
++			fields["ss"], fields["sp"] = 0, nil
++		}
++	case "checklist-reorder":
++		if op.Index == nil {
++			return nil, nil, fmt.Errorf("checklist-reorder requires index")
++		}
++		fields["ix"] = *op.Index
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: checklistKind, payload: fields}
++	return env, map[string]string{"cmd": op.Cmd, "uuid": op.UUID}, nil
++}
++
++// buildBatchChecklistDelete deletes a checklist item: action 2 with an empty
++// payload, as Things writes it.
++func buildBatchChecklistDelete(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("checklist-delete requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 2, kind: checklistKind, payload: map[string]any{}}
++	return env, map[string]string{"cmd": "checklist-delete", "uuid": op.UUID}, nil
++}
++
+ func buildBatchTrash(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
+ 	if op.UUID == "" {
+ 		return nil, nil, fmt.Errorf("trash requires uuid")
+@@ -1404,6 +1867,20 @@ func buildBatchTrash(op BatchOp) (thingscloud.Identifiable, map[string]string, e
+ 	return env, map[string]string{"cmd": "trash", "uuid": op.UUID}, nil
+ }
+ 
++// buildBatchDelete deletes a heading (or another task item) for good: Task7
++// action 2 with an empty payload, as Things writes it. Its to-dos must be
++// moved out first (the app does that in the same batch).
++func buildBatchDelete(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("delete requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 2, kind: task7WriteKind, payload: map[string]any{}}
++	return env, map[string]string{"cmd": "delete", "uuid": op.UUID}, nil
++}
++
+ func buildBatchPurge(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
+ 	if op.UUID == "" {
+ 		return nil, nil, fmt.Errorf("purge requires uuid")
+@@ -1467,6 +1944,39 @@ func buildBatchMoveToArea(op BatchOp) (thingscloud.Identifiable, map[string]stri
+ 	return env, map[string]string{"cmd": "move-to-area", "uuid": op.UUID, "area": op.Area}, nil
+ }
+ 
++// buildBatchReorder changes only a to-do's position, so several to-dos can be
++// renumbered in one request.
++func buildBatchReorder(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("reorder requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	if op.Index == nil && op.TodayIndex == nil {
++		return nil, nil, fmt.Errorf("reorder requires index or todayIndex")
++	}
++	if op.TodayDate != "" && op.TodayIndex == nil {
++		return nil, nil, fmt.Errorf("todayDate requires todayIndex")
++	}
++	u := newTaskUpdate()
++	if op.Index != nil {
++		u.fields["ix"] = *op.Index
++	}
++	if op.TodayIndex != nil {
++		u.fields["ti"] = *op.TodayIndex
++	}
++	if op.TodayDate != "" {
++		t := parseDate(op.TodayDate)
++		if t == nil {
++			return nil, nil, fmt.Errorf("invalid todayDate %q", op.TodayDate)
++		}
++		u.fields["tir"] = t.Unix()
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: task7WriteKind, payload: u.build()}
++	return env, map[string]string{"cmd": "reorder", "uuid": op.UUID}, nil
++}
++
+ func buildBatchEdit(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
+ 	if op.UUID == "" {
+ 		return nil, nil, fmt.Errorf("edit requires uuid")
+@@ -1608,12 +2118,19 @@ func main() {
+ 	}
+ 
+ 	cmd := os.Args[1]
+-	ctx := initCLI(commandNeedsHistoryHead(cmd))
++	if cmd == "serve" {
++		cmdServe()
++		return
++	}
++	runCommand(initCLI(commandNeedsHistoryHead(cmd)), cmd, os.Args[2:])
++}
+ 
++// runCommand runs one command; serve mode runs several in one process.
++func runCommand(ctx *cliContext, cmd string, args []string) {
+ 	switch cmd {
+ 	// Read commands — need state
+ 	case "list":
+-		cmdList(ctx.loadState(), os.Args[2:])
++		cmdList(ctx.loadState(), args)
+ 	case "today":
+ 		cmdListWithOpts(ctx.loadState(), map[string]string{"today": "true"})
+ 	case "inbox":
+@@ -1625,10 +2142,10 @@ func main() {
+ 	case "upcoming":
+ 		cmdListWithOpts(ctx.loadState(), map[string]string{"upcoming": "true"})
+ 	case "search":
+-		cmdSearch(ctx.loadState(), os.Args[2:])
++		cmdSearch(ctx.loadState(), args)
+ 	case "show":
+-		requireArgs(os.Args[2:], 1, "things-cli show <uuid>")
+-		cmdShow(ctx.loadState(), os.Args[2])
++		requireArgs(args, 1, "things-cli show <uuid>")
++		cmdShow(ctx.loadState(), args[0])
+ 	case "areas":
+ 		cmdAreas(ctx.loadState())
+ 	case "projects":
+@@ -1638,29 +2155,29 @@ func main() {
+ 
+ 	// Write commands — skip state loading
+ 	case "create":
+-		cmdCreate(ctx.history, os.Args[2:])
++		cmdCreate(ctx.history, args)
+ 	case "create-area":
+-		cmdCreateArea(ctx.history, os.Args[2:])
++		cmdCreateArea(ctx.history, args)
+ 	case "create-tag":
+-		cmdCreateTag(ctx.history, os.Args[2:])
++		cmdCreateTag(ctx.history, args)
+ 	case "add-checklist":
+-		requireArgs(os.Args[2:], 2, `things-cli add-checklist <task-uuid> "Item 1,Item 2,Item 3"`)
+-		cmdAddChecklist(ctx.history, os.Args[2], os.Args[3:])
++		requireArgs(args, 2, `things-cli add-checklist <task-uuid> "Item 1,Item 2,Item 3"`)
++		cmdAddChecklist(ctx.history, args[0], args[1:])
+ 	case "edit":
+-		requireArgs(os.Args[2:], 1, "things-cli edit <uuid> [--title ...] [--note ...]")
+-		cmdEdit(ctx.history, os.Args[2], os.Args[3:])
++		requireArgs(args, 1, "things-cli edit <uuid> [--title ...] [--note ...]")
++		cmdEdit(ctx.history, args[0], args[1:])
+ 	case "complete":
+-		requireArgs(os.Args[2:], 1, "things-cli complete <uuid>")
+-		cmdComplete(ctx.history, os.Args[2])
++		requireArgs(args, 1, "things-cli complete <uuid>")
++		cmdComplete(ctx.history, args[0])
+ 	case "trash":
+-		requireArgs(os.Args[2:], 1, "things-cli trash <uuid>")
+-		cmdTrash(ctx.history, os.Args[2])
++		requireArgs(args, 1, "things-cli trash <uuid>")
++		cmdTrash(ctx.history, args[0])
+ 	case "purge":
+-		requireArgs(os.Args[2:], 1, "things-cli purge <uuid>")
+-		cmdPurge(ctx.history, os.Args[2])
++		requireArgs(args, 1, "things-cli purge <uuid>")
++		cmdPurge(ctx.history, args[0])
+ 	case "move-to-today":
+-		requireArgs(os.Args[2:], 1, "things-cli move-to-today <uuid>")
+-		cmdMoveToToday(ctx.history, os.Args[2])
++		requireArgs(args, 1, "things-cli move-to-today <uuid>")
++		cmdMoveToToday(ctx.history, args[0])
+ 	case "batch":
+ 		cmdBatch(ctx.history)
+ 
+@@ -1668,3 +2185,30 @@ func main() {
+ 		fatalf("unknown command: %s", cmd)
+ 	}
+ }
++
++// buildBatchTagRename changes a tag's title (tt on Tag4, the kind tag-create
++// writes; Things wrote tt alone).
++func buildBatchTagRename(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	title := strings.TrimSpace(op.Title)
++	if op.UUID == "" || title == "" {
++		return nil, nil, fmt.Errorf("tag-rename requires uuid and title")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 1, kind: "Tag4", payload: map[string]any{"tt": title}}
++	return env, map[string]string{"cmd": "tag-rename", "uuid": op.UUID}, nil
++}
++
++// buildBatchTagDelete deletes a tag as Things does: Tag4 action 2 with an
++// empty payload. To-dos keep its id; Things ignores missing tags.
++func buildBatchTagDelete(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {
++	if op.UUID == "" {
++		return nil, nil, fmt.Errorf("tag-delete requires uuid")
++	}
++	if err := validateBatchOpIdentifiers(op); err != nil {
++		return nil, nil, err
++	}
++	env := writeEnvelope{id: op.UUID, action: 2, kind: "Tag4", payload: map[string]any{}}
++	return env, map[string]string{"cmd": "tag-delete", "uuid": op.UUID}, nil
++}
+diff --git a/cmd/things-cli/main_test.go b/cmd/things-cli/main_test.go
+index a16b06b..14f8b15 100644
+--- a/cmd/things-cli/main_test.go
++++ b/cmd/things-cli/main_test.go
+@@ -664,7 +664,9 @@ func TestCLIStateCacheMalformedFileTreatedAsNoCache(t *testing.T) {
+ 
+ func testStateForListFilters() *memory.State {
+ 	state := memory.NewState()
+-	today := time.Now().UTC()
++	// Things stores start dates as midnight UTC of the local calendar day.
++	now := time.Now()
++	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+ 	tomorrow := today.Add(24 * time.Hour)
+ 
+ 	state.Areas[testAreaID] = &thingscloud.Area{UUID: testAreaID, Title: "Work"}
+@@ -874,3 +876,45 @@ func TestNewTaskCreatePayloadStructuralTypesNeverInbox(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestListTasksTodayIncludesPastStartDatesAndSkipsCanceled(t *testing.T) {
++	state := testStateForListFilters()
++	now := time.Now()
++	yesterday := time.Date(now.Year(), now.Month(), now.Day()-1, 0, 0, 0, 0, time.UTC)
++	state.Tasks["overdue-1"] = &thingscloud.Task{
++		UUID:          "overdue-1",
++		Title:         "Overdue Task",
++		Schedule:      thingscloud.TaskScheduleAnytime,
++		ScheduledDate: &yesterday,
++	}
++	state.Tasks["canceled-1"] = &thingscloud.Task{
++		UUID:          "canceled-1",
++		Title:         "Canceled Task",
++		Schedule:      thingscloud.TaskScheduleAnytime,
++		ScheduledDate: &yesterday,
++		Status:        thingscloud.TaskStatusCanceled,
++	}
++
++	requireUUIDs(t, listTasks(state, map[string]string{"today": "true"}), "overdue-1", "today-1")
++	for _, uuid := range outputUUIDs(listTasks(state, map[string]string{})) {
++		if uuid == "canceled-1" || uuid == "completed-1" {
++			t.Fatalf("list includes closed task %s", uuid)
++		}
++	}
++}
++
++func TestListTasksTodayUsesLocalCalendarDay(t *testing.T) {
++	previous := time.Local
++	defer func() { time.Local = previous }()
++	// Far ahead of UTC, the local day is usually one day later than the UTC day.
++	time.Local = time.FixedZone("UTC+14", 14*60*60)
++
++	now := time.Now()
++	localToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
++	localTomorrow := localToday.Add(24 * time.Hour)
++	state := memory.NewState()
++	state.Tasks["local-today"] = &thingscloud.Task{UUID: "local-today", Title: "A", Schedule: thingscloud.TaskScheduleAnytime, ScheduledDate: &localToday}
++	state.Tasks["local-tomorrow"] = &thingscloud.Task{UUID: "local-tomorrow", Title: "B", Schedule: thingscloud.TaskScheduleAnytime, ScheduledDate: &localTomorrow}
++
++	requireUUIDs(t, listTasks(state, map[string]string{"today": "true"}), "local-today")
++}
+diff --git a/cmd/things-cli/repeat.go b/cmd/things-cli/repeat.go
+new file mode 100644
+index 0000000..04a5884
+--- /dev/null
++++ b/cmd/things-cli/repeat.go
+@@ -0,0 +1,85 @@
++package main
++
++import (
++	"encoding/json"
++	"fmt"
++	"time"
++
++	thingscloud "github.com/arthursoares/things-cloud-sdk"
++)
++
++// RepeatSpec makes a created to-do a repeating template. Start is the first
++// day it is due; the weekday, day of the month or date of the rule follow
++// from it. Month picks the monthly kind: "day" (default), "last" (the start
++// must be the month's last day) or "weekday" (e.g. the first Thursday).
++type RepeatSpec struct {
++	Type  string `json:"type"` // "fixed" or "after" (completion)
++	Unit  string `json:"unit"` // "day", "week", "month" or "year"
++	Every int    `json:"every"`
++	Month string `json:"month,omitempty"`
++	Start string `json:"start"`
++}
++
++var repeatUnits = map[string]int{"day": 16, "week": 256, "month": 8, "year": 4}
++
++// repeatRule builds rr as Things writes a new rule: the rule starts today
++// (sr), its anchor is the first day (ia), no end and no early start.
++func repeatRule(spec RepeatSpec, today time.Time) (json.RawMessage, int64, error) {
++	unit, ok := repeatUnits[spec.Unit]
++	if !ok {
++		return nil, 0, fmt.Errorf("repeat unit must be day, week, month or year")
++	}
++	if spec.Type != "fixed" && spec.Type != "after" {
++		return nil, 0, fmt.Errorf("repeat type must be fixed or after")
++	}
++	if spec.Every < 1 || spec.Every > 99 {
++		return nil, 0, fmt.Errorf("repeat every must be 1..99")
++	}
++	first, err := time.Parse("2006-01-02", spec.Start)
++	if err != nil {
++		return nil, 0, fmt.Errorf("repeat start must be YYYY-MM-DD")
++	}
++	day := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
++	if first.Before(day) {
++		return nil, 0, fmt.Errorf("repeat start must not be in the past")
++	}
++	var offset map[string]int
++	switch spec.Unit {
++	case "day":
++		offset = map[string]int{"dy": 0}
++	case "week":
++		offset = map[string]int{"wd": int(first.Weekday())}
++	case "month":
++		switch spec.Month {
++		case "", "day":
++			offset = map[string]int{"dy": first.Day() - 1}
++		case "last":
++			if first.AddDate(0, 0, 1).Month() == first.Month() {
++				return nil, 0, fmt.Errorf("repeat start must be the last day of its month")
++			}
++			offset = map[string]int{"dy": -1}
++		case "weekday":
++			nth := (first.Day()-1)/7 + 1
++			if nth > 4 {
++				return nil, 0, fmt.Errorf("repeat start must be in the first four weeks of its month")
++			}
++			offset = map[string]int{"wd": int(first.Weekday()), "wdo": nth}
++		default:
++			return nil, 0, fmt.Errorf("repeat month must be day, last or weekday")
++		}
++	case "year":
++		offset = map[string]int{"dy": first.Day() - 1, "mo": int(first.Month()) - 1}
++	}
++	if spec.Unit != "month" && spec.Month != "" {
++		return nil, 0, fmt.Errorf("repeat month is only for monthly rules")
++	}
++	tp := 0
++	if spec.Type == "after" {
++		tp = 1
++	}
++	rule, _ := json.Marshal(map[string]any{
++		"rrv": 4, "tp": tp, "fu": unit, "fa": spec.Every, "of": []map[string]int{offset},
++		"ia": first.Unix(), "sr": day.Unix(), "rc": 0, "ts": 0, "ed": thingscloud.NoRepeatEnd,
++	})
++	return rule, first.Unix(), nil
++}
+diff --git a/cmd/things-cli/serve.go b/cmd/things-cli/serve.go
+new file mode 100644
+index 0000000..4874ce4
+--- /dev/null
++++ b/cmd/things-cli/serve.go
+@@ -0,0 +1,137 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++
++	thingscloud "github.com/arthursoares/things-cloud-sdk"
++)
++
++// serve mode keeps one things-cli process running for a host application:
++// it signs in once, keeps the connection to Things Cloud open and the state
++// in memory, and runs one command per input line. Each line is a JSON
++// request {"args":[...],"input":...,"offline":bool}; each answer is one JSON
++// line {"ok":bool,"output":"...","error":"..."}. The first output line is
++// {"ready":true,"protocol":1}.
++
++const serveProtocol = 1
++
++type serveRequest struct {
++	Args []string `json:"args"`
++	// Input is the batch command's stdin.
++	Input json.RawMessage `json:"input,omitempty"`
++	// Offline reads use the state as of the previous command without asking
++	// Things Cloud for changes.
++	Offline bool `json:"offline,omitempty"`
++}
++
++type serveResponse struct {
++	OK     bool   `json:"ok"`
++	Output string `json:"output,omitempty"`
++	Error  string `json:"error,omitempty"`
++}
++
++// serveFailure carries a fatal error out of a command in serve mode.
++type serveFailure string
++
++var (
++	serving bool
++	// commandOut and commandIn replace stdout and stdin while serve mode
++	// runs a command.
++	commandOut io.Writer
++	commandIn  io.Reader
++	// serveState is the state after the last command, serveSnapshot the
++	// cache file content it was read from or saved as.
++	serveState    *cliStateCache
++	serveSnapshot []byte
++	serveOffline  bool
++)
++
++func outputWriter() io.Writer {
++	if commandOut != nil {
++		return commandOut
++	}
++	return os.Stdout
++}
++
++func inputReader() io.Reader {
++	if commandIn != nil {
++		return commandIn
++	}
++	return os.Stdin
++}
++
++func cmdServe() {
++	serving = true
++	// Writes check their targets against the history; keep what was read.
++	thingscloud.KeepPreflightIndex = true
++	out := json.NewEncoder(os.Stdout)
++	_ = out.Encode(map[string]any{"ready": true, "protocol": serveProtocol})
++	in := bufio.NewReader(os.Stdin)
++	var ctx *cliContext
++	for {
++		line, err := in.ReadBytes('\n')
++		if len(bytes.TrimSpace(line)) > 0 {
++			var request serveRequest
++			response := serveResponse{}
++			if jsonErr := json.Unmarshal(line, &request); jsonErr != nil || len(request.Args) == 0 {
++				response.Error = "serve: invalid request"
++			} else {
++				var output bytes.Buffer
++				ctx, response.Error = serveCommand(ctx, request, &output)
++				response.OK = response.Error == ""
++				response.Output = output.String()
++			}
++			if err := out.Encode(response); err != nil {
++				os.Exit(1)
++			}
++		}
++		if err != nil {
++			return
++		}
++	}
++}
++
++// serveCommand runs one request. After a failure the connection and the
++// in-memory state are dropped, so the next command starts clean.
++func serveCommand(ctx *cliContext, request serveRequest, output *bytes.Buffer) (next *cliContext, failure string) {
++	commandOut, commandIn = output, bytes.NewReader(request.Input)
++	serveOffline = request.Offline
++	defer func() {
++		commandOut, commandIn, serveOffline = nil, nil, false
++		if recovered := recover(); recovered != nil {
++			message, ok := recovered.(serveFailure)
++			if !ok {
++				message = serveFailure(fmt.Sprint("internal error: ", recovered))
++			}
++			next, failure = nil, strings.TrimSpace(string(message))
++			serveState, serveSnapshot = nil, nil
++			output.Reset()
++		}
++	}()
++	cmd, args := request.Args[0], request.Args[1:]
++	if cmd == "serve" {
++		fatalf("serve: already serving")
++	}
++	if ctx == nil {
++		ctx = initCLI(false)
++		// Read the history for write checks now, so the first write does
++		// not wait for it. A failure here is repeated by that write.
++		if thingscloud.KeepPreflightIndex {
++			warm := *ctx.history
++			go func() { _ = warm.WarmPreflightIndex() }()
++		}
++	}
++	if commandNeedsHistoryHead(cmd) {
++		if err := ctx.history.Sync(); err != nil {
++			fatal("sync history", err)
++		}
++	}
++	runCommand(ctx, cmd, args)
++	return ctx, ""
++}
+diff --git a/cmd/things-cli/serve_test.go b/cmd/things-cli/serve_test.go
+new file mode 100644
+index 0000000..19214bb
+--- /dev/null
++++ b/cmd/things-cli/serve_test.go
+@@ -0,0 +1,180 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++
++	thingscloud "github.com/arthursoares/things-cloud-sdk"
++)
++
++// serveCloud is a fake Things Cloud that counts requests by kind.
++func serveCloud(t *testing.T) (*httptest.Server, func() map[string]int) {
++	t.Helper()
++	var mu sync.Mutex
++	counts := map[string]int{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		mu.Lock()
++		defer mu.Unlock()
++		switch {
++		case strings.Contains(r.URL.Path, "/commit"):
++			counts["commit"]++
++			fmt.Fprint(w, `{"server-head-index":2}`)
++		case strings.HasSuffix(r.URL.Path, "/items"):
++			counts["items"]++
++			if r.URL.Query().Get("start-index") == "0" {
++				fmt.Fprint(w, `{"items":[{"VJ1edXTP9q3PmFDUuy8EQh":{"e":"Task7","t":0,"p":{"tt":"seeded","tp":0,"st":1,"ss":0,"rr":null,"rp":null,"rt":[]}}}],"current-item-index":1,"schema":301}`)
++			} else {
++				fmt.Fprint(w, `{"items":[],"current-item-index":1,"schema":301}`)
++			}
++		case strings.Contains(r.URL.Path, "/version/1/history/"):
++			counts["history"]++
++			fmt.Fprint(w, `{"latest-server-index":1,"latest-schema-version":301}`)
++		case strings.Contains(r.URL.Path, "/account/"):
++			counts["account"]++
++			fmt.Fprint(w, `{"email":"t@example.com","status":"SYAccountStatusActive","history-key":"hist-1"}`)
++		default:
++			fmt.Fprint(w, `{}`)
++		}
++	}))
++	t.Cleanup(server.Close)
++	return server, func() map[string]int {
++		mu.Lock()
++		defer mu.Unlock()
++		snapshot := map[string]int{}
++		for key, value := range counts {
++			snapshot[key] = value
++		}
++		return snapshot
++	}
++}
++
++func serveTestEnv(t *testing.T) (cache string, counts func() map[string]int) {
++	t.Helper()
++	server, counts := serveCloud(t)
++	cache = filepath.Join(t.TempDir(), "state.json")
++	t.Setenv("THINGS_ENDPOINT", server.URL)
++	t.Setenv("THINGS_USERNAME", "t@example.com")
++	t.Setenv("THINGS_PASSWORD", "pw")
++	t.Setenv("THINGS_CLI_CACHE", cache)
++	serving = true
++	t.Cleanup(func() { serving, serveState, serveSnapshot, thingscloud.KeepPreflightIndex = false, nil, nil, false })
++	return cache, counts
++}
++
++func TestServeKeepsSessionAndState(t *testing.T) {
++	cache, counts := serveTestEnv(t)
++	run := func(ctx *cliContext, request serveRequest) (*cliContext, string) {
++		t.Helper()
++		var output bytes.Buffer
++		next, failure := serveCommand(ctx, request, &output)
++		if failure != "" {
++			t.Fatalf("%v failed: %s", request.Args, failure)
++		}
++		return next, output.String()
++	}
++
++	ctx, out := run(nil, serveRequest{Args: []string{"list"}})
++	if !strings.Contains(out, "seeded") {
++		t.Fatalf("list output = %s", out)
++	}
++	first := counts()
++	if first["account"] == 0 || first["items"] != 1 {
++		t.Fatalf("first list requests = %v", first)
++	}
++	info, err := os.Stat(cache)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	// Offline reads ask Things Cloud nothing.
++	ctx, _ = run(ctx, serveRequest{Args: []string{"today"}, Offline: true})
++	if got := counts(); fmt.Sprint(got) != fmt.Sprint(first) {
++		t.Fatalf("offline today requests = %v, want %v", got, first)
++	}
++
++	// Later reads reuse the sign-in and skip saving an unchanged state.
++	ctx, out = run(ctx, serveRequest{Args: []string{"list"}})
++	if got := counts(); got["account"] != first["account"] || got["items"] != first["items"] || got["history"] != first["history"]+1 {
++		t.Fatalf("second list requests = %v after %v", got, first)
++	}
++	if !strings.Contains(out, "seeded") {
++		t.Fatalf("second list output = %s", out)
++	}
++	if again, err := os.Stat(cache); err != nil || !again.ModTime().Equal(info.ModTime()) {
++		t.Fatal("unchanged state was saved again")
++	}
++
++	// Writes fetch the history head first, then commit.
++	ctx, out = run(ctx, serveRequest{Args: []string{"batch"}, Input: json.RawMessage(`[{"cmd":"trash","uuid":"VJ1edXTP9q3PmFDUuy8EQh"}]`)})
++	if got := counts(); got["commit"] != 1 || !strings.Contains(out, `"trash"`) {
++		t.Fatalf("batch requests = %v, output %s", got, out)
++	}
++
++	// A failure is reported, and the next command starts clean.
++	var output bytes.Buffer
++	next, failure := serveCommand(ctx, serveRequest{Args: []string{"batch"}, Input: json.RawMessage(`[]`)}, &output)
++	if next != nil || !strings.Contains(failure, "no operations") || serveState != nil || output.Len() != 0 {
++		t.Fatalf("failed batch: ctx %v, failure %q, output %q", next, failure, output.String())
++	}
++	before := counts()["account"]
++	if _, failure := serveCommand(nil, serveRequest{Args: []string{"today"}}, &output); failure != "" {
++		t.Fatalf("today after failure: %s", failure)
++	}
++	if counts()["account"] == before {
++		t.Fatal("no new sign-in after a failure")
++	}
++}
++
++func TestServeLoopAnswersOneLinePerRequest(t *testing.T) {
++	serveTestEnv(t)
++	serving = false
++	inRead, inWrite, _ := os.Pipe()
++	outRead, outWrite, _ := os.Pipe()
++	origIn, origOut := os.Stdin, os.Stdout
++	os.Stdin, os.Stdout = inRead, outWrite
++	t.Cleanup(func() { os.Stdin, os.Stdout = origIn, origOut })
++	go func() {
++		fmt.Fprintln(inWrite, `{"args":["list"]}`)
++		fmt.Fprintln(inWrite, `not json`)
++		fmt.Fprintln(inWrite, `{"args":["serve"]}`)
++		inWrite.Close()
++	}()
++	done := make(chan struct{})
++	go func() {
++		cmdServe()
++		outWrite.Close()
++		close(done)
++	}()
++	lines := bufio.NewScanner(outRead)
++	lines.Buffer(make([]byte, 1<<20), 1<<20)
++	var got []string
++	for lines.Scan() {
++		got = append(got, lines.Text())
++	}
++	<-done
++	if len(got) != 4 || got[0] != `{"protocol":1,"ready":true}` {
++		t.Fatalf("lines = %q", got)
++	}
++	var list, invalid, nested serveResponse
++	for i, target := range []*serveResponse{&list, &invalid, &nested} {
++		if err := json.Unmarshal([]byte(got[i+1]), target); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if !list.OK || !strings.Contains(list.Output, "seeded") {
++		t.Fatalf("list = %+v", list)
++	}
++	if invalid.OK || invalid.Error != "serve: invalid request" || nested.OK || !strings.Contains(nested.Error, "already serving") {
++		t.Fatalf("invalid = %+v, nested = %+v", invalid, nested)
++	}
++}
+diff --git a/cmd/things-cli/wire_test.go b/cmd/things-cli/wire_test.go
+index c37af2b..5deeb18 100644
+--- a/cmd/things-cli/wire_test.go
++++ b/cmd/things-cli/wire_test.go
+@@ -240,6 +240,25 @@ type capturedCommit struct {
+ // newWireRecorder returns a History wired to a fake server plus slices
+ // collecting history preflight GETs and every commit POSTed through it.
+ func newWireRecorder(t *testing.T, ordinaryTaskIDs ...string) (*thingscloud.History, *[]capturedCommit, *[]string) {
++	t.Helper()
++	seeds := make(map[string]map[string]any, len(ordinaryTaskIDs))
++	for _, id := range ordinaryTaskIDs {
++		seeds[id] = map[string]any{
++			"tt": "seeded ordinary task",
++			"tp": 0,
++			"st": 1,
++			"ss": 0,
++			"rr": nil,
++			"rp": nil,
++			"rt": []string{},
++		}
++	}
++	return newSeededWireRecorder(t, seeds)
++}
++
++// newSeededWireRecorder is newWireRecorder with the creation payload of each
++// seeded task given.
++func newSeededWireRecorder(t *testing.T, seeds map[string]map[string]any) (*thingscloud.History, *[]capturedCommit, *[]string) {
+ 	t.Helper()
+ 	var commits []capturedCommit
+ 	var historyRequests []string
+@@ -259,21 +278,9 @@ func newWireRecorder(t *testing.T, ordinaryTaskIDs ...string) (*thingscloud.Hist
+ 			if got := r.URL.Query().Get("start-index"); got != "0" {
+ 				t.Errorf("preflight start-index = %q, want 0", got)
+ 			}
+-			created := make(map[string]any, len(ordinaryTaskIDs))
+-			for _, id := range ordinaryTaskIDs {
+-				created[id] = map[string]any{
+-					"e": "Task7",
+-					"t": 0,
+-					"p": map[string]any{
+-						"tt": "seeded ordinary task",
+-						"tp": 0,
+-						"st": 1,
+-						"ss": 0,
+-						"rr": nil,
+-						"rp": nil,
+-						"rt": []string{},
+-					},
+-				}
++			created := make(map[string]any, len(seeds))
++			for id, payload := range seeds {
++				created[id] = map[string]any{"e": "Task7", "t": 0, "p": payload}
+ 			}
+ 			items := make([]map[string]any, 7)
+ 			items[0] = created
+@@ -378,6 +385,62 @@ func TestCmdCompleteWire(t *testing.T) {
+ 	}
+ }
+ 
++// repeatingSeeds returns a repeating template and one of its instances as
++// Things writes them: the template has the rule (rr) and icsd, the instance
++// names the template in rt.
++func repeatingSeeds() (template, instance string, seeds map[string]map[string]any) {
++	template, instance = thingscloud.NewUUID(), thingscloud.NewUUID()
++	rule := map[string]any{"ed": 64092211200, "fa": 0, "fu": 16, "ia": 1770000000, "of": []any{map[string]any{"wd": 1}}, "rc": 0, "rrv": 4, "sr": 1770000000, "tp": 0, "ts": 0}
++	seeds = map[string]map[string]any{
++		template: {"tt": "template", "tp": 0, "st": 1, "ss": 0, "rr": rule, "rp": nil, "rt": []string{}, "icsd": 1770000000, "acrd": nil},
++		instance: {"tt": "instance", "tp": 0, "st": 1, "ss": 0, "rr": nil, "rp": nil, "rt": []string{template}},
++	}
++	return template, instance, seeds
++}
++
++func TestCmdCompleteRepeatingInstanceWire(t *testing.T) {
++	_, instance, seeds := repeatingSeeds()
++	h, commits, historyRequests := newSeededWireRecorder(t, seeds)
++
++	cmdComplete(h, instance)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	id, action, _, p := singleItem(t, (*commits)[0])
++	assertTaskPreflight(t, *historyRequests, (*commits)[0])
++	if id != instance || action != 1 || p["ss"] != float64(3) {
++		t.Errorf("complete instance wire = %s action %d ss %v", id, action, p["ss"])
++	}
++}
++
++func TestCmdRepeatingTemplateWire(t *testing.T) {
++	template, _, seeds := repeatingSeeds()
++	h, commits, _ := newSeededWireRecorder(t, seeds)
++
++	cmdTrash(h, template)
++	if len(*commits) != 1 {
++		t.Fatalf("trash template: %d commits, want 1", len(*commits))
++	}
++
++	// Completing a template is refused before anything is sent; in serve
++	// mode the refusal ends the command with a message.
++	serving = true
++	defer func() { serving = false }()
++	message := func() (message string) {
++		defer func() {
++			if failure, ok := recover().(serveFailure); ok {
++				message = string(failure)
++			}
++		}()
++		cmdComplete(h, template)
++		return ""
++	}()
++	if !strings.Contains(message, "repeating template") || len(*commits) != 1 {
++		t.Fatalf("complete template: message %q, %d commits", message, len(*commits))
++	}
++}
++
+ func TestCmdTrashWire(t *testing.T) {
+ 	id := thingscloud.NewUUID()
+ 	h, commits, historyRequests := newWireRecorder(t, id)
+@@ -738,3 +801,703 @@ func TestReadCommandsRenderState(t *testing.T) {
+ 		t.Errorf("tags output is not a JSON array: %v\n%s", err, out)
+ 	}
+ }
++
++func TestCmdBatchReorderWire(t *testing.T) {
++	id1, id2 := thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, id1, id2)
++
++	ops := fmt.Sprintf(`[
++		{"cmd":"reorder","uuid":%q,"index":-120},
++		{"cmd":"reorder","uuid":%q,"todayIndex":5,"todayDate":"2026-10-27"}
++	]`, id1, id2)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = w.WriteString(ops); w.Close() }()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	body := (*commits)[0].body
++	for _, id := range []string{id1, id2} {
++		if item := body[id]; item.E != "Task7" || item.T != 1 {
++			t.Fatalf("envelope %s = %s/%d, want Task7/1", id, item.E, item.T)
++		}
++	}
++	var first, second map[string]any
++	if err := json.Unmarshal(body[id1].P, &first); err != nil {
++		t.Fatal(err)
++	}
++	if err := json.Unmarshal(body[id2].P, &second); err != nil {
++		t.Fatal(err)
++	}
++	if first["ix"] != float64(-120) || first["ti"] != nil || first["md"] == nil || len(first) != 2 {
++		t.Fatalf("index payload = %v, want only ix and md", first)
++	}
++	wantTir := float64(time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC).Unix())
++	if second["ti"] != float64(5) || second["tir"] != wantTir || second["ix"] != nil || len(second) != 3 {
++		t.Fatalf("today payload = %v, want ti, tir and md", second)
++	}
++}
++
++func TestBuildBatchReorderRejectsIncompleteOps(t *testing.T) {
++	five := 5
++	for _, op := range []BatchOp{
++		{Cmd: "reorder"},
++		{Cmd: "reorder", UUID: thingscloud.NewUUID()},
++		{Cmd: "reorder", UUID: thingscloud.NewUUID(), Index: &five, TodayDate: "2026-10-27"},
++		{Cmd: "reorder", UUID: thingscloud.NewUUID(), TodayIndex: &five, TodayDate: "27.10.2026"},
++	} {
++		if _, _, err := buildBatchEnvelope(op); err == nil {
++			t.Fatalf("op %+v was accepted", op)
++		}
++	}
++}
++
++func TestCmdBatchChecklistAndRestoreWire(t *testing.T) {
++	taskID, itemID, newItemID, trashedID := thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, taskID, trashedID)
++
++	ops := fmt.Sprintf(`[
++		{"cmd":"checklist-add","uuid":%q,"task":%q,"title":" Buy screws ","index":-5},
++		{"cmd":"checklist-edit","uuid":%q,"title":"Buy M4 screws"},
++		{"cmd":"restore","uuid":%q}
++	]`, newItemID, taskID, itemID, trashedID)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = w.WriteString(ops); w.Close() }()
++
++	cmdBatch(h)
++
++	body := (*commits)[0].body
++	add, edit, restore := body[newItemID], body[itemID], body[trashedID]
++	if add.E != "ChecklistItem3" || add.T != 0 || edit.E != "ChecklistItem3" || edit.T != 1 || restore.E != "Task7" || restore.T != 1 {
++		t.Fatalf("envelopes = %s/%d %s/%d %s/%d", add.E, add.T, edit.E, edit.T, restore.E, restore.T)
++	}
++	var addP, editP, restoreP map[string]any
++	_ = json.Unmarshal(add.P, &addP)
++	_ = json.Unmarshal(edit.P, &editP)
++	_ = json.Unmarshal(restore.P, &restoreP)
++	if addP["tt"] != "Buy screws" || addP["ix"] != float64(-5) || addP["ss"] != float64(0) {
++		t.Fatalf("add payload = %v", addP)
++	}
++	if ts, _ := addP["ts"].([]any); len(ts) != 1 || ts[0] != taskID {
++		t.Fatalf("add ts = %v", addP["ts"])
++	}
++	if editP["tt"] != "Buy M4 screws" || editP["md"] == nil || len(editP) != 2 {
++		t.Fatalf("edit payload = %v", editP)
++	}
++	if restoreP["tr"] != false || len(restoreP) != 2 {
++		t.Fatalf("restore payload = %v", restoreP)
++	}
++}
++
++func TestBuildBatchChecklistChanges(t *testing.T) {
++	id := thingscloud.NewUUID()
++	done, notDone, index := true, false, 7
++	cases := []struct {
++		op   BatchOp
++		want map[string]any
++	}{
++		{BatchOp{Cmd: "checklist-complete", UUID: id, Done: &done}, map[string]any{"ss": 3}},
++		{BatchOp{Cmd: "checklist-complete", UUID: id, Done: &notDone}, map[string]any{"ss": 0, "sp": nil}},
++		{BatchOp{Cmd: "checklist-reorder", UUID: id, Index: &index}, map[string]any{"ix": 7}},
++	}
++	for _, c := range cases {
++		env, _, err := buildBatchEnvelope(c.op)
++		if err != nil {
++			t.Fatalf("%s: %v", c.op.Cmd, err)
++		}
++		fields := env.(writeEnvelope).payload.(map[string]any)
++		for key, want := range c.want {
++			if got := fields[key]; got != want {
++				t.Fatalf("%s %s = %v, want %v", c.op.Cmd, key, got, want)
++			}
++		}
++	}
++	env, _, err := buildBatchEnvelope(BatchOp{Cmd: "checklist-delete", UUID: id})
++	if err != nil || env.(writeEnvelope).action != 2 || len(env.(writeEnvelope).payload.(map[string]any)) != 0 {
++		t.Fatalf("delete = %+v, %v", env, err)
++	}
++	for _, op := range []BatchOp{
++		{Cmd: "checklist-add", Title: "x"},
++		{Cmd: "checklist-add", Task: id, Title: " "},
++		{Cmd: "checklist-edit", UUID: id},
++		{Cmd: "checklist-complete", UUID: id},
++		{Cmd: "checklist-reorder", UUID: id},
++		{Cmd: "checklist-delete"},
++		{Cmd: "restore"},
++	} {
++		if _, _, err := buildBatchEnvelope(op); err == nil {
++			t.Fatalf("%+v accepted", op)
++		}
++	}
++}
++
++func TestBuildBatchCreateRejectsPosition(t *testing.T) {
++	index := -900
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "create", Title: "Top", Index: &index}); err == nil {
++		t.Fatal("create with a position was accepted")
++	}
++}
++
++// TestCmdBatchCreateThenReorderWire runs both writes through the Task7 write
++// check, the way the app puts a new to-do at the top.
++func TestCmdBatchCreateThenReorderWire(t *testing.T) {
++	id := thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, id)
++	run := func(ops string) {
++		r, w, _ := os.Pipe()
++		origStdin := os.Stdin
++		os.Stdin = r
++		defer func() { os.Stdin = origStdin }()
++		go func() { _, _ = w.WriteString(ops); w.Close() }()
++		cmdBatch(h)
++	}
++	run(fmt.Sprintf(`[{"cmd":"create","uuid":%q,"title":"Top","when":"today"}]`, id))
++	run(fmt.Sprintf(`[{"cmd":"reorder","uuid":%q,"index":-900,"todayIndex":-1200}]`, id))
++	if len(*commits) != 2 {
++		t.Fatalf("%d commits, want 2", len(*commits))
++	}
++	var p map[string]any
++	if err := json.Unmarshal((*commits)[1].body[id].P, &p); err != nil || p["ix"] != float64(-900) || p["ti"] != float64(-1200) {
++		t.Fatalf("reorder payload = %v, %v", p, err)
++	}
++}
++
++func TestBuildBatchReopenAndLogCompleted(t *testing.T) {
++	id := thingscloud.NewUUID()
++	env, _, err := buildBatchEnvelope(BatchOp{Cmd: "reopen", UUID: id})
++	if err != nil {
++		t.Fatal(err)
++	}
++	fields := env.(writeEnvelope).payload.(map[string]any)
++	if fields["ss"] != 0 || fields["sp"] != nil || len(fields) != 3 {
++		t.Fatalf("reopen payload = %v", fields)
++	}
++	env, _, err = buildBatchEnvelope(BatchOp{Cmd: "log-completed"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	logged := env.(writeEnvelope)
++	if logged.id != settingsID || logged.kind != "Settings5" || logged.action != 1 || len(logged.payload.(map[string]any)) != 1 {
++		t.Fatalf("log-completed envelope = %+v", logged)
++	}
++	if err := thingscloud.ValidateUUID(settingsID); err != nil {
++		t.Fatalf("settings id: %v", err)
++	}
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "log-completed", UUID: id}); err == nil {
++		t.Fatal("log-completed with uuid accepted")
++	}
++}
++
++// TestCmdBatchReopenAndLogCompletedWire writes both through the write check.
++func TestCmdBatchReopenAndLogCompletedWire(t *testing.T) {
++	id := thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, id)
++	ops := fmt.Sprintf(`[{"cmd":"reopen","uuid":%q},{"cmd":"log-completed"}]`, id)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = w.WriteString(ops); w.Close() }()
++
++	cmdBatch(h)
++
++	body := (*commits)[0].body
++	if body[id].E != "Task7" || body[settingsID].E != "Settings5" || body[settingsID].T != 1 {
++		t.Fatalf("envelopes = %+v", body)
++	}
++	var reopen, settings map[string]any
++	_ = json.Unmarshal(body[id].P, &reopen)
++	_ = json.Unmarshal(body[settingsID].P, &settings)
++	if reopen["ss"] != float64(0) || reopen["sp"] != nil {
++		t.Fatalf("reopen payload = %v", reopen)
++	}
++	if _, ok := settings["ld"].(float64); !ok || len(settings) != 1 {
++		t.Fatalf("settings payload = %v", settings)
++	}
++}
++
++// TestCmdBatchMoveWire moves to-dos into a project and an area without
++// touching their schedule, through the write check.
++func TestCmdBatchMoveWire(t *testing.T) {
++	a, b, project, area := thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, a, b)
++	ops := fmt.Sprintf(`[{"cmd":"move","uuid":%q,"project":%q},{"cmd":"move","uuid":%q,"area":%q}]`, a, project, b, area)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = w.WriteString(ops); w.Close() }()
++
++	cmdBatch(h)
++
++	body := (*commits)[0].body
++	var toProject, toArea map[string]any
++	_ = json.Unmarshal(body[a].P, &toProject)
++	_ = json.Unmarshal(body[b].P, &toArea)
++	for name, p := range map[string]map[string]any{"project": toProject, "area": toArea} {
++		for _, key := range []string{"st", "sr", "tir"} {
++			if _, ok := p[key]; ok {
++				t.Fatalf("%s move changed %s: %v", name, key, p)
++			}
++		}
++	}
++	if pr := toProject["pr"].([]any); len(pr) != 1 || pr[0] != project || len(toProject["ar"].([]any)) != 0 {
++		t.Fatalf("project move = %v", toProject)
++	}
++	if ar := toArea["ar"].([]any); len(ar) != 1 || ar[0] != area || len(toArea["pr"].([]any)) != 0 {
++		t.Fatalf("area move = %v", toArea)
++	}
++	for _, op := range []BatchOp{{Cmd: "move", UUID: a}, {Cmd: "move", UUID: a, Project: project, Area: area}} {
++		if _, _, err := buildBatchEnvelope(op); err == nil {
++			t.Fatalf("%+v accepted", op)
++		}
++	}
++}
++
++// TestCmdBatchDatesTagsHeadingAreaWire writes the editor operations through
++// the write check and compares them with what Things writes.
++func TestCmdBatchDatesTagsHeadingAreaWire(t *testing.T) {
++	ids := make([]string, 8)
++	for i := range ids {
++		ids[i] = thingscloud.NewUUID()
++	}
++	heading, tag, area, renamed, tagged, untagged := thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, ids...)
++	ops := fmt.Sprintf(`[
++		{"cmd":"schedule","uuid":%q,"when":"someday"},
++		{"cmd":"schedule","uuid":%q,"startDate":"2099-03-04"},
++		{"cmd":"deadline","uuid":%q,"deadlineDate":"2099-05-06"},
++		{"cmd":"deadline","uuid":%q,"deadlineDate":""},
++		{"cmd":"tags","uuid":%q,"tags":[%q]},
++		{"cmd":"move","uuid":%q,"heading":%q},
++		{"cmd":"area-reorder","uuid":%q,"index":-40},
++		{"cmd":"area-rename","uuid":%q,"title":" Garden "},
++		{"cmd":"area-tags","uuid":%q,"tags":[%q]},
++		{"cmd":"area-tags","uuid":%q,"tags":[]},
++		{"cmd":"schedule","uuid":%q,"when":"evening"},
++		{"cmd":"schedule","uuid":%q,"when":"today"}
++	]`, ids[0], ids[1], ids[2], ids[3], ids[4], tag, ids[5], heading, area, renamed, tagged, tag, untagged, ids[6], ids[7])
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = w.WriteString(ops); w.Close() }()
++
++	cmdBatch(h)
++
++	body := (*commits)[0].body
++	payload := func(id string) map[string]any {
++		var p map[string]any
++		if err := json.Unmarshal(body[id].P, &p); err != nil {
++			t.Fatal(err)
++		}
++		return p
++	}
++	if p := payload(ids[0]); p["st"] != float64(2) || p["sr"] != nil || p["tir"] != nil || p["sb"] != float64(0) {
++		t.Fatalf("someday = %v", p)
++	}
++	// This Evening as Things writes it: Today (st 1, sr = tir = today) with
++	// sb 1; back to Today with sb 0.
++	today := float64(todayMidnightUTC())
++	if p := payload(ids[6]); p["st"] != float64(1) || p["sr"] != today || p["tir"] != today || p["sb"] != float64(1) {
++		t.Fatalf("evening = %v", p)
++	}
++	if p := payload(ids[7]); p["st"] != float64(1) || p["sr"] != today || p["sb"] != float64(0) {
++		t.Fatalf("today = %v", p)
++	}
++	want := float64(time.Date(2099, 3, 4, 0, 0, 0, 0, time.UTC).Unix())
++	if p := payload(ids[1]); p["st"] != float64(2) || p["sr"] != want || p["tir"] != want {
++		t.Fatalf("scheduled = %v", p)
++	}
++	if p := payload(ids[2]); p["dd"] != float64(time.Date(2099, 5, 6, 0, 0, 0, 0, time.UTC).Unix()) || len(p) != 2 {
++		t.Fatalf("deadline = %v", p)
++	}
++	if p := payload(ids[3]); p["dd"] != nil || len(p) != 2 {
++		t.Fatalf("no deadline = %v", p)
++	}
++	if p := payload(ids[4]); len(p["tg"].([]any)) != 1 || p["tg"].([]any)[0] != tag || len(p) != 2 {
++		t.Fatalf("tags = %v", p)
++	}
++	if p := payload(ids[5]); p["agr"].([]any)[0] != heading || len(p["pr"].([]any)) != 0 || len(p["ar"].([]any)) != 0 {
++		t.Fatalf("heading move = %v", p)
++	}
++	if body[area].E != "Area3" || body[area].T != 1 {
++		t.Fatalf("area reorder envelope = %s/%d", body[area].E, body[area].T)
++	}
++	if p := payload(renamed); body[renamed].E != "Area3" || body[renamed].T != 1 || p["tt"] != "Garden" || len(p) != 1 {
++		t.Fatalf("area rename = %s/%d %v", body[renamed].E, body[renamed].T, p)
++	}
++	// Things writes area tags as tg alone on Area3.
++	if p := payload(tagged); body[tagged].E != "Area3" || body[tagged].T != 1 || len(p) != 1 || len(p["tg"].([]any)) != 1 || p["tg"].([]any)[0] != tag {
++		t.Fatalf("area tags = %s/%d %v", body[tagged].E, body[tagged].T, p)
++	}
++	if p := payload(untagged); len(p) != 1 || len(p["tg"].([]any)) != 0 {
++		t.Fatalf("no area tags = %v", p)
++	}
++	for _, op := range []BatchOp{
++		{Cmd: "schedule", UUID: ids[0]},
++		{Cmd: "schedule", UUID: ids[0], When: "today", StartDate: "2099-01-01"},
++		{Cmd: "schedule", UUID: ids[0], When: "tomorrow"},
++		{Cmd: "deadline", UUID: ids[0]},
++		{Cmd: "move", UUID: ids[0], Heading: heading, Project: heading},
++		{Cmd: "area-reorder", UUID: area},
++		{Cmd: "area-rename", UUID: area, Title: " "},
++		{Cmd: "area-tags"},
++		{Cmd: "area-tags", UUID: area, Tags: []string{"--x"}},
++	} {
++		if _, _, err := buildBatchEnvelope(op); err == nil {
++			t.Fatalf("%+v accepted", op)
++		}
++	}
++}
++
++func TestCmdBatchUnfileWire(t *testing.T) {
++	id := thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, id)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = w.WriteString(fmt.Sprintf(`[{"cmd":"unfile","uuid":%q}]`, id)); w.Close() }()
++
++	cmdBatch(h)
++
++	var p map[string]any
++	_ = json.Unmarshal((*commits)[0].body[id].P, &p)
++	for _, key := range []string{"pr", "ar", "agr"} {
++		if values, ok := p[key].([]any); !ok || len(values) != 0 {
++			t.Fatalf("%s = %v", key, p[key])
++		}
++	}
++	if len(p) != 4 {
++		t.Fatalf("unfile payload = %v", p)
++	}
++}
++
++// TestCmdBatchCancelWire cancels a to-do through the write check, as Things
++// writes it: {md, ss:2, sp:<now>}.
++func TestCmdBatchCancelWire(t *testing.T) {
++	id := thingscloud.NewUUID()
++	h, commits, historyRequests := newWireRecorder(t, id)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() { _, _ = fmt.Fprintf(w, `[{"cmd":"cancel","uuid":%q}]`, id); w.Close() }()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	assertTaskPreflight(t, *historyRequests, (*commits)[0])
++	gotID, action, kind, p := singleItem(t, (*commits)[0])
++	if gotID != id || action != 1 || kind != "Task7" || p["ss"] != float64(2) || len(p) != 3 {
++		t.Fatalf("cancel = %s %d %s %v", gotID, action, kind, p)
++	}
++	if sp, ok := p["sp"].(float64); !ok || sp <= 0 {
++		t.Fatalf("sp = %v, want the cancel time", p["sp"])
++	}
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "cancel"}); err == nil {
++		t.Fatal("cancel without uuid accepted")
++	}
++}
++
++// TestCmdBatchDeleteHeadingWire deletes a heading as Things does: its to-do
++// goes to the project root ({agr:[], pr:[project]}), then the heading gets
++// action 2 with an empty payload, in one commit.
++func TestCmdBatchDeleteHeadingWire(t *testing.T) {
++	todo, heading, project := thingscloud.NewUUID(), thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, todo)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() {
++		_, _ = fmt.Fprintf(w, `[{"cmd":"move","uuid":%q,"project":%q},{"cmd":"delete","uuid":%q}]`, todo, project, heading)
++		w.Close()
++	}()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	body := (*commits)[0].body
++	if deleted := body[heading]; deleted.E != "Task7" || deleted.T != 2 || string(deleted.P) != "{}" {
++		t.Fatalf("heading delete = %s/%d %s", deleted.E, deleted.T, deleted.P)
++	}
++	var moved map[string]any
++	if err := json.Unmarshal(body[todo].P, &moved); err != nil || len(moved["agr"].([]any)) != 0 || moved["pr"].([]any)[0] != project {
++		t.Fatalf("to-do move = %v (%v)", moved, err)
++	}
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "delete"}); err == nil {
++		t.Fatal("delete without uuid accepted")
++	}
++}
++
++// TestCmdBatchDeleteAreaWire deletes an area as current Things does: its
++// projects and to-dos go to the Trash ({tr:true}), then Area3 action 2 {}.
++func TestCmdBatchDeleteAreaWire(t *testing.T) {
++	todo, area := thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, todo)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() {
++		_, _ = fmt.Fprintf(w, `[{"cmd":"trash","uuid":%q},{"cmd":"area-delete","uuid":%q}]`, todo, area)
++		w.Close()
++	}()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	body := (*commits)[0].body
++	if deleted := body[area]; deleted.E != "Area3" || deleted.T != 2 || string(deleted.P) != "{}" {
++		t.Fatalf("area delete = %s/%d %s", deleted.E, deleted.T, deleted.P)
++	}
++	var trashed map[string]any
++	if err := json.Unmarshal(body[todo].P, &trashed); err != nil || trashed["tr"] != true {
++		t.Fatalf("to-do trash = %v (%v)", trashed, err)
++	}
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "area-delete"}); err == nil {
++		t.Fatal("area-delete without uuid accepted")
++	}
++}
++
++// TestCmdBatchEmptyTrashWire empties the Trash as Things does: per item Task7
++// action 2 {} plus a Tombstone2 {dloid, dld} in the same commit.
++func TestCmdBatchEmptyTrashWire(t *testing.T) {
++	todo, project := thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() {
++		_, _ = fmt.Fprintf(w, `[{"cmd":"delete","uuid":%q},{"cmd":"purge","uuid":%q},{"cmd":"delete","uuid":%q},{"cmd":"purge","uuid":%q}]`, todo, todo, project, project)
++		w.Close()
++	}()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	body := (*commits)[0].body
++	if len(body) != 4 {
++		t.Fatalf("%d envelopes, want 4", len(body))
++	}
++	purged := map[string]bool{}
++	for id, item := range body {
++		switch item.E {
++		case "Task7":
++			if item.T != 2 || string(item.P) != "{}" || (id != todo && id != project) {
++				t.Fatalf("delete %s = %d %s", id, item.T, item.P)
++			}
++		case "Tombstone2":
++			var payload struct {
++				Dloid string   `json:"dloid"`
++				Dld   *float64 `json:"dld"`
++			}
++			if err := json.Unmarshal(item.P, &payload); err != nil || item.T != 0 || payload.Dld == nil {
++				t.Fatalf("tombstone %s = %d %s (%v)", id, item.T, item.P, err)
++			}
++			purged[payload.Dloid] = true
++		default:
++			t.Fatalf("unexpected envelope %s %s", id, item.E)
++		}
++	}
++	if !purged[todo] || !purged[project] {
++		t.Fatalf("tombstones for %v, want both items", purged)
++	}
++
++	// A tombstone for an item not deleted in the same commit is refused.
++	other := thingscloud.NewUUID()
++	valid, _, _ := buildBatchEnvelope(BatchOp{Cmd: "delete", UUID: todo})
++	stray, _, _ := buildBatchEnvelope(BatchOp{Cmd: "purge", UUID: other})
++	if err := h.Write(valid, stray); err == nil || !strings.Contains(err.Error(), "not deleted in this commit") {
++		t.Fatalf("stray tombstone write = %v, want refusal", err)
++	}
++}
++
++// TestCmdBatchReminderWire sets and removes a reminder as Things does: ato,
++// seconds after midnight, with the start date ({md, ato, st, sr, tir}); a
++// removal writes ato null alone.
++func TestCmdBatchReminderWire(t *testing.T) {
++	// A day in the future: Things files it as Upcoming (st 2).
++	later := time.Now().UTC().AddDate(0, 0, 3)
++	date := later.Format("2006-01-02")
++	todo, other := thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t, todo, other)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() {
++		_, _ = fmt.Fprintf(w, `[{"cmd":"reminder","uuid":%q,"time":"12:30","startDate":%q},{"cmd":"reminder","uuid":%q,"time":""}]`, todo, date, other)
++		w.Close()
++	}()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	body := (*commits)[0].body
++	var set, removed map[string]any
++	if err := json.Unmarshal(body[todo].P, &set); err != nil {
++		t.Fatal(err)
++	}
++	day := float64(time.Date(later.Year(), later.Month(), later.Day(), 0, 0, 0, 0, time.UTC).Unix())
++	if set["ato"] != float64(45000) || set["sr"] != day || set["tir"] != day || set["st"] != float64(2) || len(set) != 5 {
++		t.Fatalf("reminder set = %v", set)
++	}
++	if err := json.Unmarshal(body[other].P, &removed); err != nil || len(removed) != 2 || removed["ato"] != nil {
++		t.Fatalf("reminder removed = %v (%v)", removed, err)
++	}
++	late, nine := "25:00", "09:00"
++	for _, op := range []BatchOp{
++		{Cmd: "reminder", UUID: todo},
++		{Cmd: "reminder", UUID: todo, Time: &late, StartDate: date},
++		{Cmd: "reminder", UUID: todo, Time: &nine},
++	} {
++		if _, _, err := buildBatchEnvelope(op); err == nil {
++			t.Fatalf("reminder %+v accepted", op)
++		}
++	}
++}
++
++// TestCmdBatchCreateRepeatingWire creates repeating templates as Things does:
++// a to-do with rr (version 4, no end, no early start), icsd on the first
++// day, Someday (st 2) and no start date. Day numbers are 0-based, weekdays
++// count from Sunday = 0 and months from January = 0.
++func TestCmdBatchCreateRepeatingWire(t *testing.T) {
++	today := time.Unix(todayMidnightUTC(), 0).UTC()
++	// 2030-05-02 is a Thursday in the first week of May; 2030-01-31 the last
++	// day of January.
++	cases := []struct {
++		name   string
++		repeat string
++		tp, fu int
++		fa     int
++		of     string
++		first  string
++	}{
++		{"daily", `{"type":"fixed","unit":"day","every":1,"start":"2030-05-02"}`, 0, 16, 1, `[{"dy":0}]`, "2030-05-02"},
++		{"every 2 weeks", `{"type":"fixed","unit":"week","every":2,"start":"2030-05-02"}`, 0, 256, 2, `[{"wd":4}]`, "2030-05-02"},
++		{"monthly by day", `{"type":"fixed","unit":"month","every":1,"start":"2030-05-02"}`, 0, 8, 1, `[{"dy":1}]`, "2030-05-02"},
++		{"monthly last day", `{"type":"fixed","unit":"month","every":1,"month":"last","start":"2030-01-31"}`, 0, 8, 1, `[{"dy":-1}]`, "2030-01-31"},
++		{"first Thursday", `{"type":"fixed","unit":"month","every":1,"month":"weekday","start":"2030-05-02"}`, 0, 8, 1, `[{"wd":4,"wdo":1}]`, "2030-05-02"},
++		{"yearly", `{"type":"fixed","unit":"year","every":1,"start":"2030-05-02"}`, 0, 4, 1, `[{"dy":1,"mo":4}]`, "2030-05-02"},
++		{"after completion", `{"type":"after","unit":"week","every":1,"start":"2030-05-02"}`, 1, 256, 1, `[{"wd":4}]`, "2030-05-02"},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			h, commits, _ := newWireRecorder(t)
++			r, w, _ := os.Pipe()
++			origStdin := os.Stdin
++			os.Stdin = r
++			t.Cleanup(func() { os.Stdin = origStdin })
++			id := thingscloud.NewUUID()
++			go func() {
++				_, _ = fmt.Fprintf(w, `[{"cmd":"create","uuid":%q,"title":"Water plants","repeat":%s}]`, id, c.repeat)
++				w.Close()
++			}()
++
++			cmdBatch(h)
++
++			if len(*commits) != 1 {
++				t.Fatalf("%d commits, want 1", len(*commits))
++			}
++			created := (*commits)[0].body[id]
++			var p map[string]json.RawMessage
++			if err := json.Unmarshal(created.P, &p); err != nil || created.E != "Task7" || created.T != 0 {
++				t.Fatalf("create = %s/%d %s", created.E, created.T, created.P)
++			}
++			first, _ := time.Parse("2006-01-02", c.first)
++			if string(p["icsd"]) != fmt.Sprint(first.Unix()) || string(p["st"]) != "2" || string(p["sr"]) != "null" || string(p["tir"]) != "null" || string(p["rt"]) != "[]" || string(p["acrd"]) != "null" {
++				t.Fatalf("template fields icsd=%s st=%s sr=%s tir=%s rt=%s acrd=%s", p["icsd"], p["st"], p["sr"], p["tir"], p["rt"], p["acrd"])
++			}
++			var rr map[string]json.RawMessage
++			_ = json.Unmarshal(p["rr"], &rr)
++			want := map[string]string{
++				"rrv": "4", "tp": fmt.Sprint(c.tp), "fu": fmt.Sprint(c.fu), "fa": fmt.Sprint(c.fa), "of": c.of,
++				"ia": fmt.Sprint(first.Unix()), "sr": fmt.Sprint(today.Unix()), "rc": "0", "ts": "0", "ed": "64092211200",
++			}
++			if len(rr) != len(want) {
++				t.Fatalf("rr = %s", p["rr"])
++			}
++			for key, value := range want {
++				if string(rr[key]) != value {
++					t.Fatalf("rr %s = %s, want %s (%s)", key, rr[key], value, p["rr"])
++				}
++			}
++		})
++	}
++
++	for name, repeat := range map[string]RepeatSpec{
++		"past start":        {Type: "fixed", Unit: "day", Every: 1, Start: today.AddDate(0, 0, -1).Format("2006-01-02")},
++		"unknown unit":      {Type: "fixed", Unit: "hour", Every: 1, Start: "2030-05-02"},
++		"unknown type":      {Type: "sometimes", Unit: "day", Every: 1, Start: "2030-05-02"},
++		"every 0":           {Type: "fixed", Unit: "day", Every: 0, Start: "2030-05-02"},
++		"last, not last":    {Type: "fixed", Unit: "month", Every: 1, Month: "last", Start: "2030-05-02"},
++		"fifth weekday":     {Type: "fixed", Unit: "month", Every: 1, Month: "weekday", Start: "2030-05-30"},
++		"month kind weekly": {Type: "fixed", Unit: "week", Every: 1, Month: "last", Start: "2030-05-02"},
++	} {
++		if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "create", Title: "x", Repeat: &repeat}); err == nil {
++			t.Fatalf("%s accepted", name)
++		}
++	}
++	spec := RepeatSpec{Type: "fixed", Unit: "day", Every: 1, Start: "2030-05-02"}
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "create", Title: "x", When: "today", Repeat: &spec}); err == nil {
++		t.Fatal("repeat with when accepted")
++	}
++	if _, _, err := buildBatchEnvelope(BatchOp{Cmd: "trash", UUID: thingscloud.NewUUID(), Repeat: &spec}); err == nil {
++		t.Fatal("repeat outside create accepted")
++	}
++}
++
++// TestCmdBatchTagRenameAndDeleteWire renames a tag ({tt} on Tag4) and
++// deletes another (Tag4 action 2 {}), as Things does.
++func TestCmdBatchTagRenameAndDeleteWire(t *testing.T) {
++	renamed, deleted := thingscloud.NewUUID(), thingscloud.NewUUID()
++	h, commits, _ := newWireRecorder(t)
++	r, w, _ := os.Pipe()
++	origStdin := os.Stdin
++	os.Stdin = r
++	t.Cleanup(func() { os.Stdin = origStdin })
++	go func() {
++		_, _ = fmt.Fprintf(w, `[{"cmd":"tag-rename","uuid":%q,"title":" Garden "},{"cmd":"tag-delete","uuid":%q}]`, renamed, deleted)
++		w.Close()
++	}()
++
++	cmdBatch(h)
++
++	if len(*commits) != 1 {
++		t.Fatalf("%d commits, want 1", len(*commits))
++	}
++	body := (*commits)[0].body
++	if item := body[renamed]; item.E != "Tag4" || item.T != 1 || string(item.P) != `{"tt":"Garden"}` {
++		t.Fatalf("tag rename = %s/%d %s", item.E, item.T, item.P)
++	}
++	if item := body[deleted]; item.E != "Tag4" || item.T != 2 || string(item.P) != "{}" {
++		t.Fatalf("tag delete = %s/%d %s", item.E, item.T, item.P)
++	}
++	for _, op := range []BatchOp{{Cmd: "tag-rename", UUID: renamed, Title: " "}, {Cmd: "tag-delete"}} {
++		if _, _, err := buildBatchEnvelope(op); err == nil {
++			t.Fatalf("%+v accepted", op)
++		}
++	}
++}
+diff --git a/histories.go b/histories.go
+index 93e6b3e..9ef0f81 100644
+--- a/histories.go
++++ b/histories.go
+@@ -10,6 +10,7 @@ import (
+ 	"net/http/httputil"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"unicode/utf8"
+ )
+ 
+@@ -250,7 +251,7 @@ func (h *History) Write(items ...Identifiable) error {
+ 	}
+ 	ancestorIndex := h.LatestServerIndex
+ 	if plan.needsPreflight() {
+-		checkedHead, err := h.preflightTask7Modifications(plan.modificationTargets)
++		checkedHead, err := h.preflightTask7Modifications(plan.modificationTargets, plan.modificationKeys)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -311,7 +312,133 @@ type task7TargetState struct {
+ 	acrd     bool
+ }
+ 
+-func (h *History) preflightTask7Modifications(targets map[string]struct{}) (int, error) {
++// KeepPreflightIndex makes Task7 preflights keep what they read: the states
++// of every item in the history and the index up to which they are applied.
++// A later preflight then reads only the items added since, instead of the
++// whole history. Long-running processes (things-cli serve) turn it on; the
++// checks are the same as in a full scan.
++var KeepPreflightIndex bool
++
++// preflightIndex holds the preflight states of all items of one history,
++// applied up to (not including) server index next.
++type preflightIndex struct {
++	key    string
++	next   int
++	states map[string]*task7TargetState
++}
++
++var (
++	preflightMu    sync.Mutex
++	preflightCache *preflightIndex
++)
++
++// preflightKey identifies a history of one account on one server.
++func (h *History) preflightKey() string {
++	return h.Client.Endpoint + "\x00" + h.Client.EMail + "\x00" + h.ID
++}
++
++// WarmPreflightIndex reads the history into the kept preflight index, so the
++// first write with KeepPreflightIndex does not wait for it.
++func (h *History) WarmPreflightIndex() error {
++	preflightMu.Lock()
++	defer preflightMu.Unlock()
++	_, err := h.extendPreflightIndex()
++	return err
++}
++
++// extendPreflightIndex applies the items added since the kept index to a
++// copy of it and keeps the copy once all of them are applied. The caller
++// holds preflightMu.
++func (h *History) extendPreflightIndex() (*preflightIndex, error) {
++	base := preflightCache
++	if base == nil || base.key != h.preflightKey() {
++		base = &preflightIndex{key: h.preflightKey(), states: map[string]*task7TargetState{}}
++	}
++	index, err := h.scanPreflightIndex(base)
++	if err == errPreflightRegressed {
++		// The history is shorter than the kept index: start over.
++		index, err = h.scanPreflightIndex(&preflightIndex{key: h.preflightKey(), states: map[string]*task7TargetState{}})
++	}
++	if err != nil {
++		return nil, err
++	}
++	preflightCache = index
++	return index, nil
++}
++
++// errPreflightRegressed means the history is shorter than the kept index.
++var errPreflightRegressed = fmt.Errorf("Task7 write preflight: history is shorter than the kept index")
++
++func (h *History) scanPreflightIndex(base *preflightIndex) (*preflightIndex, error) {
++	states := make(map[string]*task7TargetState, len(base.states))
++	for id, state := range base.states {
++		copied := *state
++		states[id] = &copied
++	}
++	snapshot := *h
++	snapshot.LatestServerIndex = 0
++	snapshot.LoadedServerIndex = base.next
++	start, checkedHead := base.next, -1
++	for {
++		items, _, err := snapshot.Items(ItemsOptions{StartIndex: start})
++		if err != nil {
++			return nil, fmt.Errorf("Task7 write preflight: %w", err)
++		}
++		if checkedHead < 0 {
++			checkedHead = snapshot.LatestServerIndex
++			if checkedHead < 0 {
++				return nil, fmt.Errorf("Task7 write preflight: invalid history head")
++			}
++			if checkedHead < base.next {
++				return nil, errPreflightRegressed
++			}
++		} else if snapshot.LatestServerIndex < checkedHead {
++			return nil, fmt.Errorf("Task7 write preflight: history head regressed")
++		}
++		for _, item := range items {
++			if !item.HasServerIndex || item.ServerIndex >= checkedHead {
++				continue
++			}
++			if err := applyTask7PreflightItem(states, item, true); err != nil {
++				return nil, err
++			}
++		}
++		if snapshot.LoadedServerIndex >= checkedHead {
++			break
++		}
++		if snapshot.LoadedServerIndex <= start {
++			return nil, fmt.Errorf("Task7 write preflight: history ended before checked head %d", checkedHead)
++		}
++		start = snapshot.LoadedServerIndex
++	}
++	return &preflightIndex{key: base.key, next: checkedHead, states: states}, nil
++}
++
++// preflightTask7Modifications checks the targets of Task7 modifications
++// against the raw history up to its head and returns that head. keys holds
++// each target's payload keys (nil: unknown, treated as the widest write).
++func (h *History) preflightTask7Modifications(targets map[string]struct{}, keys map[string]map[string]struct{}) (int, error) {
++	if KeepPreflightIndex {
++		preflightMu.Lock()
++		defer preflightMu.Unlock()
++		index, err := h.extendPreflightIndex()
++		if err != nil {
++			return 0, err
++		}
++		states := make(map[string]*task7TargetState, len(targets))
++		for id := range targets {
++			if state := index.states[id]; state != nil {
++				copied := *state
++				states[id] = &copied
++			} else {
++				states[id] = &task7TargetState{lastAffectedIndex: -1}
++			}
++		}
++		if err := checkTask7Targets(states, keys); err != nil {
++			return 0, err
++		}
++		return index.next, nil
++	}
+ 	states := make(map[string]*task7TargetState, len(targets))
+ 	for id := range targets {
+ 		states[id] = &task7TargetState{lastAffectedIndex: -1}
+@@ -341,7 +468,7 @@ func (h *History) preflightTask7Modifications(targets map[string]struct{}) (int,
+ 			if !item.HasServerIndex || item.ServerIndex >= checkedHead {
+ 				continue
+ 			}
+-			if err := applyTask7PreflightItem(states, item); err != nil {
++			if err := applyTask7PreflightItem(states, item, false); err != nil {
+ 				return 0, err
+ 			}
+ 		}
+@@ -354,22 +481,62 @@ func (h *History) preflightTask7Modifications(targets map[string]struct{}) (int,
+ 		start = snapshot.LoadedServerIndex
+ 	}
+ 
++	if err := checkTask7Targets(states, keys); err != nil {
++		return 0, err
++	}
++	return checkedHead, nil
++}
++
++// templateWriteKeys are the properties a write may change on a repeating
++// template (rr set): rename it, change its notes, trash or restore it. Things
++// writes only these (plus its own instance bookkeeping) on templates; the
++// schedule and status belong to the instances.
++var templateWriteKeys = map[string]struct{}{"md": {}, "tt": {}, "nt": {}, "tr": {}}
++
++// checkTask7Targets decides whether the targets may be modified. Instances
++// of repeating to-dos (rt names their template, rr is null) take every
++// verified modification, as in Things. Templates (rr set, with icsd and
++// acrd) take only templateWriteKeys. Other recurrence markers (rp, or icsd
++// and acrd without rr) never occur on items Things shows and stay refused.
++func checkTask7Targets(states map[string]*task7TargetState, keys map[string]map[string]struct{}) error {
+ 	for id, state := range states {
+ 		switch {
+ 		case state.future:
+-			return 0, fmt.Errorf("Task7 write preflight: target %s has an unsupported future task kind", id)
++			return fmt.Errorf("Task7 write preflight: target %s has an unsupported future task kind", id)
+ 		case !state.exists || state.ambiguous || state.sameIndexAmbiguous:
+-			return 0, fmt.Errorf("Task7 write preflight: target %s is missing or ambiguous", id)
++			return fmt.Errorf("Task7 write preflight: target %s is missing or ambiguous", id)
+ 		case !state.rrKnown || !state.rpKnown || !state.rtKnown:
+-			return 0, fmt.Errorf("Task7 write preflight: target %s lacks complete recurrence markers", id)
+-		case state.rrActive || state.rpActive || state.rtActive || state.icsd || state.acrd:
+-			return 0, fmt.Errorf("Task7 write preflight: target %s is recurring", id)
++			return fmt.Errorf("Task7 write preflight: target %s lacks complete recurrence markers", id)
++		case state.rpActive:
++			return fmt.Errorf("Task7 write preflight: target %s is recurring", id)
++		case state.rrActive:
++			if !onlyKeys(keys[id], templateWriteKeys) {
++				return fmt.Errorf("Task7 write preflight: target %s is a repeating template; only its title, notes and trash can be changed", id)
++			}
++		case state.icsd || state.acrd:
++			return fmt.Errorf("Task7 write preflight: target %s is recurring", id)
+ 		}
+ 	}
+-	return checkedHead, nil
++	return nil
++}
++
++// onlyKeys reports whether keys is known, not empty and within allowed.
++func onlyKeys(keys, allowed map[string]struct{}) bool {
++	if len(keys) == 0 {
++		return false
++	}
++	for key := range keys {
++		if _, ok := allowed[key]; !ok {
++			return false
++		}
++	}
++	return true
+ }
+ 
+-func applyTask7PreflightItem(states map[string]*task7TargetState, item Item) error {
++// applyTask7PreflightItem applies one history item to the states of its
++// target. With create, a state is added for an item first seen; otherwise
++// only the given states change.
++func applyTask7PreflightItem(states map[string]*task7TargetState, item Item, create bool) error {
+ 	if item.Kind == ItemKind("Tombstone2") || item.Kind == ItemKind("Tombstone") {
+ 		if !utf8.Valid(item.P) || rejectUnpairedJSONSurrogates(item.P) != nil || rejectDuplicateJSONKeys(item.P, true) != nil {
+ 			return fmt.Errorf("Task7 write preflight: malformed tombstone in raw history")
+@@ -389,6 +556,9 @@ func applyTask7PreflightItem(states map[string]*task7TargetState, item Item) err
+ 		if item.Kind == ItemKind("Tombstone") && ValidateUUID(target) != nil {
+ 			target = EncodeLegacyIdentifier(target)
+ 		}
++		if states[target] == nil && create {
++			states[target] = &task7TargetState{lastAffectedIndex: -1}
++		}
+ 		if state := states[target]; state != nil {
+ 			state.markAffected(item.ServerIndex)
+ 			state.resetSemantic(false)
+@@ -400,6 +570,9 @@ func applyTask7PreflightItem(states map[string]*task7TargetState, item Item) err
+ 	if isLegacyTaskKind(item.Kind) && ValidateUUID(id) != nil {
+ 		id = EncodeLegacyIdentifier(id)
+ 	}
++	if states[id] == nil && create {
++		states[id] = &task7TargetState{lastAffectedIndex: -1}
++	}
+ 	state := states[id]
+ 	if state == nil {
+ 		return nil
+diff --git a/preflight_index_test.go b/preflight_index_test.go
+new file mode 100644
+index 0000000..3c12c3a
+--- /dev/null
++++ b/preflight_index_test.go
+@@ -0,0 +1,266 @@
++package thingscloud
++
++import (
++	"encoding/json"
++	"fmt"
++	"math/rand"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"strings"
++	"sync"
++	"testing"
++)
++
++// fakeHistory serves a growing list of history entries in small pages and
++// counts the entries it sent.
++type fakeHistory struct {
++	mu      sync.Mutex
++	entries []map[string]any
++	served  int
++}
++
++func (f *fakeHistory) set(entries []map[string]any) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.entries = entries
++}
++
++func (f *fakeHistory) sent() int {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.served
++}
++
++func (f *fakeHistory) server(t *testing.T) *httptest.Server {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		f.mu.Lock()
++		defer f.mu.Unlock()
++		start, _ := strconv.Atoi(r.URL.Query().Get("start-index"))
++		end := min(start+3, len(f.entries))
++		page := []map[string]any{}
++		if start < end {
++			page = f.entries[start:end]
++		}
++		f.served += len(page)
++		_ = json.NewEncoder(w).Encode(map[string]any{"items": page, "current-item-index": len(f.entries)})
++	}))
++	t.Cleanup(server.Close)
++	return server
++}
++
++// randomHistory builds entries that exercise the preflight rules: creations,
++// changes and deletions, recurrence markers, tombstones, two items in one
++// entry, unknown kinds and malformed payloads.
++func randomHistory(rng *rand.Rand, ids []string, length int) []map[string]any {
++	payloads := []string{
++		`{}`,
++		`{"rr":null,"rp":null,"rt":[]}`,
++		`{"rr":null,"rp":null,"rt":[],"tt":"x"}`,
++		`{"rr":{"fu":16},"rp":null,"rt":[]}`,
++		`{"rr":{"fu":16},"rp":null,"rt":[],"icsd":1700000000,"acrd":null}`,
++		`{"icc":1,"icsd":1700000000}`,
++		`{"rr":null,"rp":null,"rt":["` + ids[1] + `"]}`,
++		`{"rt":["` + ids[0] + `"]}`,
++		`{"rt":null}`,
++		`{"rp":null}`,
++		`{"icsd":1700000000}`,
++		`{"icsd":null}`,
++		`{"acrd":1700000000}`,
++		`{"rt":"bad"}`,
++		`[]`,
++	}
++	kinds := []string{"Task6", "Task7", "Task6", "Task7", "Task3", "Task9", "Area3"}
++	entries := make([]map[string]any, 0, length)
++	for range length {
++		entry := map[string]any{}
++		id := ids[rng.Intn(len(ids))]
++		entry[id] = map[string]any{
++			"e": kinds[rng.Intn(len(kinds))],
++			"t": rng.Intn(4),
++			"p": json.RawMessage(payloads[rng.Intn(len(payloads))]),
++		}
++		switch rng.Intn(6) {
++		case 0:
++			// A tombstone for another item. (For the entry's own item the SDK's
++			// result depends on the order it reads the entry's map in; see
++			// TestKeptPreflightIndexTombstoneAtTargetsFirstIndex.)
++			if target := ids[rng.Intn(len(ids))]; target != id {
++				entry[NewUUID()] = map[string]any{"e": "Tombstone2", "t": 0, "p": map[string]any{"dloid": target, "dld": 1700000000.5}}
++			}
++		case 1:
++			other := ids[rng.Intn(len(ids))]
++			if other != id {
++				entry[other] = map[string]any{"e": "Task6", "t": 1, "p": json.RawMessage(payloads[rng.Intn(3)])}
++			}
++		}
++		entries = append(entries, entry)
++	}
++	return entries
++}
++
++func preflightResult(h *History, id string) string {
++	return preflightResultKeys(h, id, nil)
++}
++
++// preflightResultKeys checks a modification of id that writes keys.
++func preflightResultKeys(h *History, id string, keys map[string]struct{}) string {
++	var planned map[string]map[string]struct{}
++	if keys != nil {
++		planned = map[string]map[string]struct{}{id: keys}
++	}
++	head, err := h.preflightTask7Modifications(map[string]struct{}{id: {}}, planned)
++	if err != nil {
++		return "error: " + err.Error()
++	}
++	return fmt.Sprint("head ", head)
++}
++
++func resetPreflightIndex(t *testing.T, keep bool) {
++	t.Helper()
++	preflightMu.Lock()
++	preflightCache = nil
++	preflightMu.Unlock()
++	KeepPreflightIndex = keep
++	t.Cleanup(func() {
++		KeepPreflightIndex = false
++		preflightMu.Lock()
++		preflightCache = nil
++		preflightMu.Unlock()
++	})
++}
++
++// preflightKeySets are the writes the random comparison checks: unknown
++// keys, a rename (allowed on templates) and a reschedule (not allowed).
++var preflightKeySets = []map[string]struct{}{
++	nil,
++	{"md": {}, "tt": {}},
++	{"md": {}, "st": {}, "sr": {}, "tir": {}},
++}
++
++// TestKeptPreflightIndexMatchesFullScan grows random histories step by step
++// and checks that a kept index gives the full scan's answer for every item.
++func TestKeptPreflightIndexMatchesFullScan(t *testing.T) {
++	ids := make([]string, 6)
++	for i := range ids {
++		ids[i] = NewUUID()
++	}
++	for seed := int64(1); seed <= 60; seed++ {
++		rng := rand.New(rand.NewSource(seed))
++		all := randomHistory(rng, ids, 40)
++		fake := &fakeHistory{}
++		server := fake.server(t)
++		h := &History{Client: New(server.URL, "test@example.com", "pw"), ID: "history-" + strconv.FormatInt(seed, 10)}
++		resetPreflightIndex(t, true)
++		for length := 0; length <= len(all); length += 1 + rng.Intn(9) {
++			fake.set(all[:length])
++			for _, id := range ids {
++				for _, keys := range preflightKeySets {
++					KeepPreflightIndex = false
++					full := preflightResultKeys(h, id, keys)
++					KeepPreflightIndex = true
++					kept := preflightResultKeys(h, id, keys)
++					if full != kept {
++						t.Fatalf("seed %d, %d entries, %s, keys %v: full scan %q, kept index %q", seed, length, id, keys, full, kept)
++					}
++				}
++			}
++		}
++	}
++}
++
++func TestKeptPreflightIndexReadsOnlyNewItems(t *testing.T) {
++	id := NewUUID()
++	created := map[string]any{"e": "Task7", "t": 0, "p": json.RawMessage(`{"rr":null,"rp":null,"rt":[]}`)}
++	entries := []map[string]any{{id: created}}
++	for range 20 {
++		entries = append(entries, map[string]any{NewUUID(): created})
++	}
++	fake := &fakeHistory{}
++	fake.set(entries)
++	server := fake.server(t)
++	h := &History{Client: New(server.URL, "test@example.com", "pw"), ID: "history"}
++	resetPreflightIndex(t, true)
++
++	if err := h.WarmPreflightIndex(); err != nil {
++		t.Fatal(err)
++	}
++	if fake.sent() != 21 {
++		t.Fatalf("warm-up read %d entries, want 21", fake.sent())
++	}
++	if got := preflightResult(h, id); got != "head 21" {
++		t.Fatalf("preflight = %s", got)
++	}
++	if fake.sent() != 21 {
++		t.Fatalf("preflight without new entries read %d entries", fake.sent()-21)
++	}
++
++	// New entries are read once; a target that became a repeating template
++	// is refused.
++	fake.set(append(entries,
++		map[string]any{NewUUID(): created},
++		map[string]any{id: map[string]any{"e": "Task7", "t": 1, "p": json.RawMessage(`{"rr":{"fu":16},"icsd":1700000000}`)}},
++	))
++	if got := preflightResult(h, id); !strings.Contains(got, "repeating template") {
++		t.Fatalf("preflight = %s", got)
++	}
++	if fake.sent() != 23 {
++		t.Fatalf("read %d entries in total, want 23", fake.sent())
++	}
++
++	// A history shorter than the index (e.g. reset) is read from the start.
++	fake.set(entries[:5])
++	if got := preflightResult(h, id); got != "head 5" {
++		t.Fatalf("after reset: %s", got)
++	}
++
++	// Without KeepPreflightIndex every preflight reads the whole history.
++	KeepPreflightIndex = false
++	before := fake.sent()
++	preflightResult(h, id)
++	preflightResult(h, id)
++	if fake.sent()-before != 10 {
++		t.Fatalf("full scans read %d entries, want 10", fake.sent()-before)
++	}
++}
++
++func TestKeptPreflightIndexIsSeparatePerHistory(t *testing.T) {
++	id := NewUUID()
++	created := map[string]any{"e": "Task7", "t": 0, "p": json.RawMessage(`{"rr":null,"rp":null,"rt":[]}`)}
++	one, two := &fakeHistory{}, &fakeHistory{}
++	one.set([]map[string]any{{id: created}})
++	two.set([]map[string]any{{NewUUID(): created}})
++	first := &History{Client: New(one.server(t).URL, "a@example.com", "pw"), ID: "one"}
++	second := &History{Client: New(two.server(t).URL, "b@example.com", "pw"), ID: "two"}
++	resetPreflightIndex(t, true)
++	if got := preflightResult(first, id); got != "head 1" {
++		t.Fatalf("first history: %s", got)
++	}
++	if got := preflightResult(second, id); !strings.Contains(got, "missing") {
++		t.Fatalf("second history: %s", got)
++	}
++}
++
++// A tombstone in the same history entry as its target's first appearance
++// makes the target ambiguous, whichever of the two is applied first (the
++// entry is a map, so the order varies).
++func TestKeptPreflightIndexTombstoneAtTargetsFirstIndex(t *testing.T) {
++	id := NewUUID()
++	entries := []map[string]any{{
++		id:        map[string]any{"e": "Task7", "t": 0, "p": json.RawMessage(`{"rr":null,"rp":null,"rt":[]}`)},
++		NewUUID(): map[string]any{"e": "Tombstone2", "t": 0, "p": map[string]any{"dloid": id, "dld": 1700000000.5}},
++	}}
++	fake := &fakeHistory{}
++	fake.set(entries)
++	server := fake.server(t)
++	for i := range 40 {
++		h := &History{Client: New(server.URL, "test@example.com", "pw"), ID: "history"}
++		resetPreflightIndex(t, false)
++		full := preflightResult(h, id)
++		resetPreflightIndex(t, true)
++		kept := preflightResult(h, id)
++		if !strings.Contains(full, "missing or ambiguous") || kept != full {
++			t.Fatalf("run %d: full scan %q, kept index %q", i, full, kept)
++		}
++	}
++}
+diff --git a/repeat_write.go b/repeat_write.go
+new file mode 100644
+index 0000000..e412a31
+--- /dev/null
++++ b/repeat_write.go
+@@ -0,0 +1,75 @@
++package thingscloud
++
++import (
++	"encoding/json"
++	"fmt"
++)
++
++// NoRepeatEnd is the rr "ed" Things writes for a rule without an end date
++// (1 January 4001).
++const NoRepeatEnd = 64092211200
++
++var repeatRuleKeys = map[string]struct{}{
++	"rrv": {}, "tp": {}, "fu": {}, "fa": {}, "of": {}, "ia": {}, "sr": {}, "rc": {}, "ts": {}, "ed": {},
++}
++
++// validateRepeatRule accepts the rr shapes Things itself writes for a new
++// rule (observed in an account history of 253,000 items): version 4, a fixed
++// schedule (tp 0) or after completion (tp 1), every fa days (fu 16), weeks
++// (256), months (8) or years (4), one offset in "of", no end and no early
++// start. Day numbers in "of" are 0-based (dy -1 is the last day of the
++// month), weekdays count from Sunday = 0 and months from January = 0.
++func validateRepeatRule(raw json.RawMessage) error {
++	rule, err := jsonObject(raw)
++	if err != nil || exactKeys(rule, repeatRuleKeys) != nil {
++		return fmt.Errorf("must contain exactly the verified rule properties")
++	}
++	want := func(key string, value int64) error {
++		if got, ok := jsonInteger(rule[key]); !ok || got != value {
++			return fmt.Errorf("%s must be %d", key, value)
++		}
++		return nil
++	}
++	for key, value := range map[string]int64{"rrv": 4, "rc": 0, "ts": 0, "ed": NoRepeatEnd} {
++		if err := want(key, value); err != nil {
++			return err
++		}
++	}
++	if tp, ok := jsonInteger(rule["tp"]); !ok || (tp != 0 && tp != 1) {
++		return fmt.Errorf("tp must be 0 or 1")
++	}
++	if fa, ok := jsonInteger(rule["fa"]); !ok || fa < 1 || fa > 99 {
++		return fmt.Errorf("fa must be 1..99")
++	}
++	var days [2]int64
++	for i, key := range []string{"sr", "ia"} {
++		value, ok := jsonInteger(rule[key])
++		if !ok || value <= 0 || value%86400 != 0 {
++			return fmt.Errorf("%s must be a day (midnight UTC)", key)
++		}
++		days[i] = value
++	}
++	if days[1] < days[0] {
++		return fmt.Errorf("ia must not be before sr")
++	}
++	var offsets []map[string]json.RawMessage
++	if json.Unmarshal(rule["of"], &offsets) != nil || len(offsets) != 1 {
++		return fmt.Errorf("of must hold one offset")
++	}
++	offset := offsets[0]
++	in := func(key string, low, high int64) bool {
++		value, ok := jsonInteger(offset[key])
++		return ok && value >= low && value <= high
++	}
++	fu, _ := jsonInteger(rule["fu"])
++	switch {
++	case fu == 16 && len(offset) == 1 && in("dy", 0, 0):
++	case fu == 256 && len(offset) == 1 && in("wd", 0, 6):
++	case fu == 8 && len(offset) == 1 && in("dy", -1, 30):
++	case fu == 8 && len(offset) == 2 && in("wd", 0, 6) && in("wdo", 1, 4):
++	case fu == 4 && len(offset) == 2 && in("dy", 0, 30) && in("mo", 0, 11):
++	default:
++		return fmt.Errorf("of does not match the unit")
++	}
++	return nil
++}
+diff --git a/state/memory/list_fields_test.go b/state/memory/list_fields_test.go
+new file mode 100644
+index 0000000..ecef861
+--- /dev/null
++++ b/state/memory/list_fields_test.go
+@@ -0,0 +1,227 @@
++package memory
++
++import (
++	"encoding/json"
++	"testing"
++	"time"
++
++	things "github.com/arthursoares/things-cloud-sdk"
++)
++
++func TestStateUpdateTask2AndTag2UseDerivedIdentifiers(t *testing.T) {
++	t.Parallel()
++
++	const (
++		legacyTaskID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
++		legacyTagID  = "44444444-5555-6666-7777-888888888888"
++	)
++	taskID := things.EncodeLegacyIdentifier(legacyTaskID)
++	tagID := things.EncodeLegacyIdentifier(legacyTagID)
++
++	state := NewState()
++	err := state.Update(
++		things.Item{UUID: legacyTagID, Kind: things.ItemKindTag2, Action: things.ItemActionCreated, P: []byte(`{"tt":"Errand"}`)},
++		taskReadItem(legacyTaskID, things.ItemKindTask2, things.ItemActionCreated, `{"tt":"Old task","st":1,"tp":0,"tg":["`+legacyTagID+`"]}`),
++		taskReadItem(taskID, task7Kind, things.ItemActionModified, `{"tt":"Renamed"}`),
++	)
++	if err != nil {
++		t.Fatalf("Update: %v", err)
++	}
++	if len(state.Tasks) != 1 {
++		t.Fatalf("got %d tasks, want the Task2 and Task7 events to share one task", len(state.Tasks))
++	}
++	task := requireTask(t, state, taskID)
++	if task.Title != "Renamed" || len(task.TagIDs) != 1 || task.TagIDs[0] != tagID {
++		t.Fatalf("task = title %q, tags %v; want Renamed with tag %s", task.Title, task.TagIDs, tagID)
++	}
++	if tag := state.Tags[tagID]; tag == nil || tag.Title != "Errand" {
++		t.Fatalf("Tag2 not stored under derived identifier: %+v", state.Tags)
++	}
++}
++
++func TestStateUpdateRepeatingTemplateAndTodayReferenceDate(t *testing.T) {
++	t.Parallel()
++
++	state := NewState()
++	update := func(payload string) *things.Task {
++		t.Helper()
++		if err := state.Update(taskReadItem("repeat", task7Kind, things.ItemActionModified, payload)); err != nil {
++			t.Fatalf("Update(%s): %v", payload, err)
++		}
++		return requireTask(t, state, "repeat")
++	}
++
++	task := update(`{"tt":"Water plants","st":1,"tir":1700006400,"rr":{"tp":0,"fu":16,"fa":1,"of":[{"dy":0}],"sr":1700006400,"ia":1700006400,"rc":0,"ts":0,"ed":64092211200}}`)
++	if !task.IsRepeatingTemplate {
++		t.Fatal("rr object did not mark a repeating template")
++	}
++	want := time.Unix(1700006400, 0).UTC()
++	if task.TodayIndexReferenceDate == nil || !task.TodayIndexReferenceDate.Equal(want) {
++		t.Fatalf("TodayIndexReferenceDate = %v, want %v", task.TodayIndexReferenceDate, want)
++	}
++
++	task = update(`{"tt":"Water the plants"}`)
++	if !task.IsRepeatingTemplate || task.TodayIndexReferenceDate == nil {
++		t.Fatal("omitted rr or tir changed the task")
++	}
++
++	task = update(`{"rr":null,"tir":null}`)
++	if task.IsRepeatingTemplate || task.TodayIndexReferenceDate != nil {
++		t.Fatalf("explicit null did not clear rr/tir: repeating=%v tir=%v", task.IsRepeatingTemplate, task.TodayIndexReferenceDate)
++	}
++}
++
++func TestStateUpdateAreaIndex(t *testing.T) {
++	t.Parallel()
++
++	state := NewState()
++	err := state.Update(
++		things.Item{UUID: "area", Kind: things.ItemKindArea3, Action: things.ItemActionCreated, P: []byte(`{"tt":"Home","ix":-120}`)},
++		things.Item{UUID: "area", Kind: things.ItemKindArea3, Action: things.ItemActionModified, P: []byte(`{"tt":"House"}`)},
++	)
++	if err != nil {
++		t.Fatalf("Update: %v", err)
++	}
++	if area := state.Areas["area"]; area == nil || area.Index != -120 || area.Title != "House" {
++		t.Fatalf("area = %+v, want House with index -120", area)
++	}
++}
++
++func TestStateUpdateAreaTags(t *testing.T) {
++	t.Parallel()
++
++	state := NewState()
++	err := state.Update(
++		things.Item{UUID: "area", Kind: things.ItemKindArea3, Action: things.ItemActionCreated, P: []byte(`{"tt":"Work","ix":0}`)},
++		things.Item{UUID: "area", Kind: things.ItemKindArea3, Action: things.ItemActionModified, P: []byte(`{"tg":["tagA","tagB"]}`)},
++		things.Item{UUID: "area", Kind: things.ItemKindArea3, Action: things.ItemActionModified, P: []byte(`{"tt":"Work!"}`)},
++	)
++	if err != nil {
++		t.Fatalf("Update: %v", err)
++	}
++	area := state.Areas["area"]
++	if area == nil || area.Title != "Work!" || len(area.TagIDs) != 2 || area.TagIDs[0] != "tagA" || area.TagIDs[1] != "tagB" {
++		t.Fatalf("area = %+v, want tags tagA, tagB kept across a title change", area)
++	}
++	if err := state.Update(things.Item{UUID: "area", Kind: things.ItemKindArea3, Action: things.ItemActionModified, P: []byte(`{"tg":[]}`)}); err != nil {
++		t.Fatalf("Update: %v", err)
++	}
++	if area := state.Areas["area"]; len(area.TagIDs) != 0 {
++		t.Fatalf("area tags after clearing = %v", area.TagIDs)
++	}
++}
++
++func TestStateUpdateKeepsLogbookSettings(t *testing.T) {
++	t.Parallel()
++
++	state := NewState()
++	err := state.Update(
++		things.Item{UUID: "Settings", Kind: "Settings2", Action: things.ItemActionCreated, P: []byte(`{"ld":1700000000,"li":1,"grpt":0}`)},
++		things.Item{UUID: "RhAzEf6qDxCD5PmnZVtBZR", Kind: "Settings5", Action: things.ItemActionModified, P: []byte(`{"ld":1789499955.16}`)},
++		things.Item{UUID: "RhAzEf6qDxCD5PmnZVtBZR", Kind: "Settings5", Action: things.ItemActionModified, P: []byte(`{"grpt":1}`)},
++	)
++	if err != nil {
++		t.Fatalf("Update: %v", err)
++	}
++	if state.LogInterval == nil || *state.LogInterval != 1 {
++		t.Fatalf("LogInterval = %v, want 1", state.LogInterval)
++	}
++	if state.LogDate == nil || state.LogDate.Unix() != 1789499955 {
++		t.Fatalf("LogDate = %v", state.LogDate)
++	}
++}
++
++func TestStateUpdateDeletesWithEmptyPayload(t *testing.T) {
++	t.Parallel()
++
++	const legacyArea = "E6CE6BA0-036D-4380-BE60-B2C073DFF21E"
++	state := NewState()
++	err := state.Update(
++		things.Item{UUID: legacyArea, Kind: things.ItemKindAreaPlain, Action: things.ItemActionCreated, P: []byte(`{"tt":"Family","ix":-1998}`)},
++		things.Item{UUID: "item", Kind: things.ItemKindChecklistItem3, Action: things.ItemActionCreated, P: []byte(`{"tt":"Step","ts":["task"]}`)},
++		things.Item{UUID: "tag", Kind: things.ItemKindTag4, Action: things.ItemActionCreated, P: []byte(`{"tt":"Errand"}`)},
++		// Things writes deletes with an empty payload.
++		things.Item{UUID: legacyArea, Kind: things.ItemKindAreaPlain, Action: things.ItemActionDeleted},
++		things.Item{UUID: "item", Kind: things.ItemKindChecklistItem3, Action: things.ItemActionDeleted},
++		things.Item{UUID: "tag", Kind: things.ItemKindTag4, Action: things.ItemActionDeleted, P: []byte(`null`)},
++	)
++	if err != nil {
++		t.Fatalf("Update: %v", err)
++	}
++	if len(state.Areas) != 0 || len(state.CheckListItems) != 0 || len(state.Tags) != 0 {
++		t.Fatalf("deleted objects remain: areas %v, checklist %v, tags %v", state.Areas, state.CheckListItems, state.Tags)
++	}
++}
++
++func TestStateUpdateEveningAndRepeatRule(t *testing.T) {
++	t.Parallel()
++
++	state := NewState()
++	update := func(payload string) *things.Task {
++		t.Helper()
++		if err := state.Update(taskReadItem("evening", task7Kind, things.ItemActionModified, payload)); err != nil {
++			t.Fatalf("Update(%s): %v", payload, err)
++		}
++		return requireTask(t, state, "evening")
++	}
++
++	rule := `{"ed":64092211200,"fa":1,"fu":256,"ia":1700006400,"of":[{"wd":5}],"rc":0,"rrv":4,"sr":1700006400,"tp":0,"ts":0}`
++	task := update(`{"tt":"Plants","st":1,"sr":1700006400,"tir":1700006400,"sb":1,"rr":` + rule + `}`)
++	if !task.Evening {
++		t.Fatal("sb 1 did not set Evening")
++	}
++	if !task.IsRepeatingTemplate || string(task.RepeatRule) != rule {
++		t.Fatalf("RepeatRule = %s, want the rr object as written (incl. rrv)", task.RepeatRule)
++	}
++
++	task = update(`{"tt":"Water plants"}`)
++	if !task.Evening || string(task.RepeatRule) != rule {
++		t.Fatal("omitted sb or rr changed the task")
++	}
++
++	task = update(`{"sb":0}`)
++	if task.Evening {
++		t.Fatal("sb 0 did not clear Evening")
++	}
++	task = update(`{"sb":1}`)
++	task = update(`{"sb":null,"rr":null}`)
++	if task.Evening || task.RepeatRule != nil || task.IsRepeatingTemplate {
++		t.Fatalf("explicit null did not clear sb/rr: evening=%v rule=%s", task.Evening, task.RepeatRule)
++	}
++}
++
++// The cache the CLI writes is the JSON of the state; a replay from it keeps
++// Evening and RepeatRule, and a task without them has neither key.
++func TestStateEveningAndRepeatRuleSurviveJSON(t *testing.T) {
++	t.Parallel()
++
++	state := NewState()
++	rule := `{"fa":2,"fu":16,"of":[{"dy":0}],"tp":1}`
++	if err := state.Update(
++		taskReadItem("a", task7Kind, things.ItemActionCreated, `{"tt":"A","sb":1,"rr":`+rule+`}`),
++		taskReadItem("b", task7Kind, things.ItemActionCreated, `{"tt":"B","sb":0,"rr":null}`),
++	); err != nil {
++		t.Fatal(err)
++	}
++	data, err := json.Marshal(state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	restored := NewState()
++	if err := json.Unmarshal(data, restored); err != nil {
++		t.Fatal(err)
++	}
++	a, b := requireTask(t, restored, "a"), requireTask(t, restored, "b")
++	if !a.Evening || string(a.RepeatRule) != rule || b.Evening || b.RepeatRule != nil {
++		t.Fatalf("after JSON: a evening=%v rule=%s, b evening=%v rule=%s", a.Evening, a.RepeatRule, b.Evening, b.RepeatRule)
++	}
++	var raw struct {
++		Tasks map[string]map[string]json.RawMessage
++	}
++	if err := json.Unmarshal(data, &raw); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := raw.Tasks["b"]["RepeatRule"]; ok {
++		t.Fatal("a task without a rule wrote RepeatRule")
++	}
++}
+diff --git a/state/memory/memory.go b/state/memory/memory.go
+index ed171da..863aa9b 100644
+--- a/state/memory/memory.go
++++ b/state/memory/memory.go
+@@ -3,6 +3,8 @@ package memory
+ import (
+ 	"encoding/json"
+ 	"sort"
++	"strings"
++	"time"
+ 
+ 	things "github.com/arthursoares/things-cloud-sdk"
+ )
+@@ -23,6 +25,11 @@ type State struct {
+ 	Tasks          map[string]*things.Task
+ 	Tags           map[string]*things.Tag
+ 	CheckListItems map[string]*things.CheckListItem
++	// LogDate (Settings ld) is when completed to-dos were last moved to the
++	// Logbook; LogInterval (li) is the logging setting (0 immediately,
++	// 1 daily, 2 manually). Completed to-dos stay in their lists until then.
++	LogDate     *time.Time `json:",omitempty"`
++	LogInterval *int       `json:",omitempty"`
+ }
+ 
+ // NewState creates a new, empty state
+@@ -43,10 +50,10 @@ func NewState() *State {
+ // and update the same objects.
+ func isLegacyItemKind(kind things.ItemKind) bool {
+ 	switch kind {
+-	case things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTaskPlain,
++	case things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTask2, things.ItemKindTaskPlain,
+ 		things.ItemKindChecklistItem, things.ItemKindChecklistItem2,
+ 		itemKindArea2, things.ItemKindAreaPlain,
+-		things.ItemKindTag, things.ItemKindTagPlain,
++		things.ItemKindTag, things.ItemKindTag2, things.ItemKindTagPlain,
+ 		things.ItemKindTombstonePlain:
+ 		return true
+ 	default:
+@@ -164,6 +171,15 @@ func (s *State) updateTask(item things.TaskActionItem) *things.Task {
+ 	if item.P.RecurrenceTaskIDs != nil {
+ 		t.RecurrenceIDs = *item.P.RecurrenceTaskIDs
+ 	}
++	if item.P.TaskIR != nil {
++		t.TodayIndexReferenceDate = item.P.TaskIR.Time()
++	}
++	if item.P.Repeater != nil {
++		t.IsRepeatingTemplate = true
++	}
++	if item.P.SubtaskBehavior != nil {
++		t.Evening = *item.P.SubtaskBehavior == 1
++	}
+ 
+ 	return t
+ }
+@@ -209,6 +225,12 @@ func (s *State) updateArea(item things.AreaActionItem) *things.Area {
+ 	if item.P.Title != nil {
+ 		a.Title = *item.P.Title
+ 	}
++	if item.P.IX != nil {
++		a.Index = *item.P.IX
++	}
++	if item.P.TagIDs != nil {
++		a.TagIDs = append([]string(nil), item.P.TagIDs...)
++	}
+ 
+ 	return a
+ }
+@@ -234,6 +256,27 @@ func (s *State) updateTag(item things.TagActionItem) *things.Tag {
+ 	return t
+ }
+ 
++// updateSettings keeps the Logbook settings; other settings are ignored.
++func (s *State) updateSettings(item things.Item) {
++	if item.Action != things.ItemActionCreated && item.Action != things.ItemActionModified {
++		return
++	}
++	var payload struct {
++		LogDate     *things.Timestamp `json:"ld"`
++		LogInterval *int              `json:"li"`
++	}
++	if json.Unmarshal(item.P, &payload) != nil {
++		return
++	}
++	if payload.LogDate != nil {
++		s.LogDate = payload.LogDate.Time()
++	}
++	if payload.LogInterval != nil {
++		value := *payload.LogInterval
++		s.LogInterval = &value
++	}
++}
++
+ // Update applies all items to update the aggregated state
+ func (s *State) Update(items ...things.Item) error {
+ 	if err := things.ValidateTaskReadKinds(items); err != nil {
+@@ -254,7 +297,7 @@ func (s *State) Update(items ...things.Item) error {
+ 	notes := make(map[string]noteState)
+ 	for i, rawItem := range items {
+ 		switch rawItem.Kind {
+-		case things.ItemKindTask, things.ItemKindTask7, things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTaskPlain:
++		case things.ItemKindTask, things.ItemKindTask7, things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTask2, things.ItemKindTaskPlain:
+ 			legacy := isLegacyItemKind(rawItem.Kind)
+ 			id := rawItem.UUID
+ 			if legacy && things.ValidateUUID(id) != nil {
+@@ -304,6 +347,10 @@ func (s *State) Update(items ...things.Item) error {
+ 	}
+ 
+ 	for i, rawItem := range items {
++		if strings.HasPrefix(string(rawItem.Kind), "Settings") {
++			s.updateSettings(rawItem)
++			continue
++		}
+ 		legacy := isLegacyItemKind(rawItem.Kind)
+ 		// A legacy-kind item whose key already parses as canonical Base58
+ 		// carries a current-generation identifier and must not be re-derived
+@@ -314,7 +361,7 @@ func (s *State) Update(items ...things.Item) error {
+ 		}
+ 
+ 		switch rawItem.Kind {
+-		case things.ItemKindTask, things.ItemKindTask7, things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTaskPlain:
++		case things.ItemKindTask, things.ItemKindTask7, things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTask2, things.ItemKindTaskPlain:
+ 			item := things.TaskActionItem{Item: rawItem}
+ 			var payload things.TaskReadPayload
+ 			if decodedTaskPayload[i] {
+@@ -333,6 +380,7 @@ func (s *State) Update(items ...things.Item) error {
+ 				if resolvedTaskNote[i] {
+ 					task.Note = resolvedTaskNotes[i]
+ 				}
++				payload.ApplyRaw(task)
+ 				payload.ApplyNulls(task)
+ 				s.Tasks[item.UUID()] = task
+ 			case things.ItemActionDeleted:
+@@ -343,8 +391,12 @@ func (s *State) Update(items ...things.Item) error {
+ 
+ 		case things.ItemKindChecklistItem, things.ItemKindChecklistItem2, things.ItemKindChecklistItem3:
+ 			item := things.CheckListActionItem{Item: rawItem}
+-			if err := json.Unmarshal(rawItem.P, &item.P); err != nil {
+-				continue // Skip unparseable items
++			// Things deletes with an empty payload; only creates and
++			// modifications need one.
++			if rawItem.Action != things.ItemActionDeleted {
++				if err := json.Unmarshal(rawItem.P, &item.P); err != nil {
++					continue // Skip unparseable items
++				}
+ 			}
+ 			if legacy && item.P.TaskIDs != nil {
+ 				encodeLegacyIDs(*item.P.TaskIDs)
+@@ -363,10 +415,14 @@ func (s *State) Update(items ...things.Item) error {
+ 
+ 		case itemKindArea2, things.ItemKindArea3, things.ItemKindAreaPlain:
+ 			item := things.AreaActionItem{Item: rawItem}
+-			if err := json.Unmarshal(rawItem.P, &item.P); err != nil {
+-				continue // Skip unparseable items
++			// Things deletes with an empty payload; only creates and
++			// modifications need one.
++			if rawItem.Action != things.ItemActionDeleted {
++				if err := json.Unmarshal(rawItem.P, &item.P); err != nil {
++					continue // Skip unparseable items
++				}
+ 			}
+-			// updateArea currently discards tg, but rewrite it anyway so a
++			// updateArea keeps tg; rewrite it so a
+ 			// future consumer of area tags sees consistent keys.
+ 			if legacy {
+ 				encodeLegacyIDs(item.P.TagIDs)
+@@ -384,10 +440,14 @@ func (s *State) Update(items ...things.Item) error {
+ 				// Unsupported action: skip
+ 			}
+ 
+-		case things.ItemKindTag, things.ItemKindTag4, things.ItemKindTagPlain:
++		case things.ItemKindTag, things.ItemKindTag4, things.ItemKindTag2, things.ItemKindTagPlain:
+ 			item := things.TagActionItem{Item: rawItem}
+-			if err := json.Unmarshal(rawItem.P, &item.P); err != nil {
+-				continue // Skip unparseable items
++			// Things deletes with an empty payload; only creates and
++			// modifications need one.
++			if rawItem.Action != things.ItemActionDeleted {
++				if err := json.Unmarshal(rawItem.P, &item.P); err != nil {
++					continue // Skip unparseable items
++				}
+ 			}
+ 			if legacy && item.P.ParentTagIDs != nil {
+ 				encodeLegacyIDs(*item.P.ParentTagIDs)
+diff --git a/sync/process.go b/sync/process.go
+index e00bdeb..ae15995 100644
+--- a/sync/process.go
++++ b/sync/process.go
+@@ -85,11 +85,11 @@ func (s *Syncer) processItems(items []things.Item, baseIndex int) ([]Change, err
+ // processItem routes an item to the correct handler based on its Kind.
+ func (s *Syncer) processItem(item things.Item, serverIndex int, ts time.Time) ([]Change, error) {
+ 	switch item.Kind {
+-	case things.ItemKindTask7, things.ItemKindTask, things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTaskPlain:
++	case things.ItemKindTask7, things.ItemKindTask, things.ItemKindTask4, things.ItemKindTask3, things.ItemKindTask2, things.ItemKindTaskPlain:
+ 		return s.processTaskItem(item, serverIndex, ts)
+ 	case itemKindArea2, things.ItemKindArea3, things.ItemKindAreaPlain:
+ 		return s.processAreaItem(item, serverIndex, ts)
+-	case things.ItemKindTag, things.ItemKindTag4, things.ItemKindTagPlain:
++	case things.ItemKindTag, things.ItemKindTag4, things.ItemKindTag2, things.ItemKindTagPlain:
+ 		return s.processTagItem(item, serverIndex, ts)
+ 	case things.ItemKindChecklistItem, things.ItemKindChecklistItem2, things.ItemKindChecklistItem3:
+ 		return s.processChecklistItem(item, serverIndex, ts)
+diff --git a/task7_write_test.go b/task7_write_test.go
+index 67287b1..31bec9c 100644
+--- a/task7_write_test.go
++++ b/task7_write_test.go
+@@ -3,6 +3,7 @@ package thingscloud
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"hash/crc32"
+ 	"io"
+ 	"net/http"
+ 	"net/http/httptest"
+@@ -120,7 +121,6 @@ func TestHistoryWriteRejectsRecurringAndAmbiguousTask7TargetsBeforePost(t *testi
+ 	}{
+ 		{name: "repeater rule", payload: `{"rr":{"f":1},"rp":null,"rt":[]}`},
+ 		{name: "repeater payload", payload: `{"rr":null,"rp":"opaque","rt":[]}`},
+-		{name: "linked instance", payload: `{"rr":null,"rp":null,"rt":["` + NewUUID() + `"]}`},
+ 		{name: "instance creation marker", payload: `{"rr":null,"rp":null,"rt":[],"icsd":1770000000}`},
+ 		{name: "after completion marker", payload: `{"rr":null,"rp":null,"rt":[],"acrd":1770000000}`},
+ 	}
+@@ -136,7 +136,7 @@ func TestHistoryWriteRejectsRecurringAndAmbiguousTask7TargetsBeforePost(t *testi
+ 			}))
+ 			defer server.Close()
+ 			h := New(server.URL, "test@example.com", "password").HistoryWithID("history")
+-			if err := h.Write(rawWriteProbe{id: target, body: task7UpdateBody(`"tt":"unsafe"`)}); err == nil {
++			if err := h.Write(rawWriteProbe{id: target, body: task7UpdateBody(`"ss":3,"sp":1770000002`)}); err == nil {
+ 				t.Fatal("Write(recurring target) succeeded")
+ 			}
+ 			if posts != 0 {
+@@ -219,7 +219,7 @@ func TestHistoryWriteTask7PreflightTracksOmissionsNullClearsDeletesAndKinds(t *t
+ 			}))
+ 			defer server.Close()
+ 			h := New(server.URL, "test@example.com", "password").HistoryWithID("history")
+-			err := h.Write(rawWriteProbe{id: target, body: task7UpdateBody(`"tt":"update"`)})
++			err := h.Write(rawWriteProbe{id: target, body: task7UpdateBody(`"ss":3,"sp":1770000002`)})
+ 			if (err == nil) != tt.wantOK {
+ 				t.Fatalf("Write() error=%v, wantOK=%v", err, tt.wantOK)
+ 			}
+@@ -244,10 +244,15 @@ func TestHistoryWriteValidatesEntireTask7BatchBeforeNetwork(t *testing.T) {
+ 		{name: "malformed modification date", body: task7UpdateBody(`"tt":"x"`)[:len(task7UpdateBody(`"tt":"x"`))-2] + `,"md":"bad"}}`},
+ 		{name: "delta note", body: task7UpdateBody(`"nt":{"_t":"tx","t":2,"ps":[]}`)},
+ 		{name: "unknown update field", body: task7UpdateBody(`"private":"fixture"`)},
+-		{name: "deleted action", body: `{"e":"Task7","t":2,"p":{}}`},
++		{name: "delete with payload", body: `{"e":"Task7","t":2,"p":{"tt":"x"}}`},
++		{name: "unknown action", body: `{"e":"Task7","t":3,"p":{}}`},
+ 		{name: "quoted action", body: strings.Replace(task7CreateBody("x"), `"t":0`, `"t":"0"`, 1)},
+ 		{name: "quoted payload integer", body: strings.Replace(task7CreateBody("x"), `"tp":0`, `"tp":"0"`, 1)},
+ 		{name: "null title", body: task7UpdateBody(`"tt":null`)},
++		{name: "evening out of range", body: task7UpdateBody(`"sb":2`)},
++		{name: "unknown status", body: task7UpdateBody(`"ss":1,"sp":1770000002`)},
++		{name: "canceled without time", body: task7UpdateBody(`"ss":2,"sp":null`)},
++		{name: "evening as boolean", body: task7UpdateBody(`"sb":true`)},
+ 		{name: "null trash", body: task7UpdateBody(`"tr":null`)},
+ 		{name: "null create boolean", body: strings.Replace(task7CreateBody("x"), `"icp":false`, `"icp":null`, 1)},
+ 		{name: "null note value", body: strings.Replace(task7CreateBody("x"), `"v":""`, `"v":null`, 1)},
+@@ -371,7 +376,7 @@ func TestHistoryWriteTask7BatchRejectsOneRecurringTargetBeforeAllPosts(t *testin
+ 	h := New(server.URL, "test@example.com", "password").HistoryWithID("history")
+ 	err := h.Write(
+ 		rawWriteProbe{id: ordinary, body: task7UpdateBody(`"tt":"safe"`)},
+-		rawWriteProbe{id: recurring, body: task7UpdateBody(`"tt":"unsafe"`)},
++		rawWriteProbe{id: recurring, body: task7UpdateBody(`"ss":3,"sp":1770000002`)},
+ 	)
+ 	if err == nil {
+ 		t.Fatal("Write(mixed recurrence batch) succeeded")
+@@ -492,7 +497,7 @@ func TestTask7PreflightRejectsInvalidUTF8TargetPayload(t *testing.T) {
+ 		ServerIndex:    0,
+ 		HasServerIndex: true,
+ 	}
+-	if err := applyTask7PreflightItem(states, item); err != nil {
++	if err := applyTask7PreflightItem(states, item, false); err != nil {
+ 		t.Fatalf("applyTask7PreflightItem returned transport-level error: %v", err)
+ 	}
+ 	if !states[target].ambiguous {
+@@ -580,3 +585,122 @@ func TestHistoryWriteMutableKindVariablesCannotEnableFutureTaskWrites(t *testing
+ 		t.Fatalf("preflight mutation case requests=%d posts=%d, want two total requests and one POST", requests, posts)
+ 	}
+ }
++
++func TestValidateTask7ModificationAllowsTodayReorder(t *testing.T) {
++	ok := map[string]json.RawMessage{"md": json.RawMessage("1789171200.5"), "ti": json.RawMessage("-2465"), "tir": json.RawMessage("1788998400")}
++	if err := validateTask7Modification(ok); err != nil {
++		t.Fatalf("Today reorder rejected: %v", err)
++	}
++	for name, p := range map[string]map[string]json.RawMessage{
++		"tir without ti":     {"md": json.RawMessage("1789171200.5"), "tir": json.RawMessage("1788998400")},
++		"null tir with ti":   {"md": json.RawMessage("1789171200.5"), "ti": json.RawMessage("1"), "tir": json.RawMessage("null")},
++		"tir with ti and ix": {"md": json.RawMessage("1789171200.5"), "ti": json.RawMessage("1"), "ix": json.RawMessage("2"), "tir": json.RawMessage("1788998400")},
++	} {
++		if err := validateTask7Modification(p); err == nil {
++			t.Fatalf("%s accepted", name)
++		}
++	}
++}
++
++// Repeating to-dos as Things writes them: the template carries the rule (rr)
++// and its instance bookkeeping (icsd, acrd); each instance names the template
++// in rt. Instances take every verified change; templates only a new title,
++// notes and trash.
++func TestHistoryWriteRepeatingInstancesAndTemplates(t *testing.T) {
++	template, instance := NewUUID(), NewUUID()
++	rule := `{"ed":64092211200,"fa":0,"fu":16,"ia":1770000000,"of":[{"wd":1}],"rc":0,"rrv":4,"sr":1770000000,"tp":0,"ts":0}`
++	history := []string{
++		taskHistoryBatch(template, ItemKindTask7, 0, `{"rr":`+rule+`,"rp":null,"rt":[],"icsd":1770000000,"acrd":null}`),
++		taskHistoryBatch(template, ItemKindTask7, 1, `{"icc":1,"icsd":1770600000}`),
++		taskHistoryBatch(instance, ItemKindTask7, 0, `{"rr":null,"rp":null,"rt":["`+template+`"]}`),
++	}
++	note := fmt.Sprintf(`"nt":{"_t":"tx","ch":%d,"t":1,"v":"new"}`, crc32.ChecksumIEEE([]byte("new")))
++	tests := []struct {
++		name   string
++		target string
++		fields string
++		wantOK bool
++	}{
++		{"complete instance", instance, `"ss":3,"sp":1770000002`, true},
++		{"reschedule instance", instance, `"st":1,"sr":1770076800,"tir":1770076800`, true},
++		{"move instance", instance, `"pr":["` + NewUUID() + `"]`, true},
++		{"deadline on instance", instance, `"dd":1770076800`, true},
++		{"trash instance", instance, `"tr":true`, true},
++		{"rename template", template, `"tt":"renamed"`, true},
++		{"notes on template", template, note, true},
++		{"trash template", template, `"tr":true`, true},
++		{"restore template", template, `"tr":false`, true},
++		{"complete template", template, `"ss":3,"sp":1770000002`, false},
++		{"reschedule template", template, `"st":1,"sr":1770076800,"tir":1770076800`, false},
++		{"deadline on template", template, `"dd":1770076800`, false},
++		{"move template", template, `"pr":["` + NewUUID() + `"]`, false},
++		{"rename and reschedule template", template, `"tt":"x","st":2,"sr":null,"tir":null`, false},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			posts := 0
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Method == http.MethodPost {
++					posts++
++					fmt.Fprint(w, `{"server-head-index":4}`)
++					return
++				}
++				fmt.Fprint(w, historyPage(len(history), history...))
++			}))
++			defer server.Close()
++			h := New(server.URL, "test@example.com", "password").HistoryWithID("history")
++			err := h.Write(rawWriteProbe{id: tt.target, body: task7UpdateBody(tt.fields)})
++			if tt.wantOK && (err != nil || posts != 1) {
++				t.Fatalf("Write() = %v, posts %d; want one POST", err, posts)
++			}
++			if !tt.wantOK {
++				if err == nil || !strings.Contains(err.Error(), "repeating template") || posts != 0 {
++					t.Fatalf("Write() = %v, posts %d; want the template refusal before any POST", err, posts)
++				}
++			}
++		})
++	}
++}
++
++func TestValidateTask7ModificationReminder(t *testing.T) {
++	md := json.RawMessage("1789171200.5")
++	for _, ato := range []string{"0", "43200", "86399", "null"} {
++		if err := validateTask7Modification(map[string]json.RawMessage{"md": md, "ato": json.RawMessage(ato)}); err != nil {
++			t.Fatalf("ato %s rejected: %v", ato, err)
++		}
++	}
++	for _, ato := range []string{"86400", "-1", `"12:00"`, "1.5"} {
++		if err := validateTask7Modification(map[string]json.RawMessage{"md": md, "ato": json.RawMessage(ato)}); err == nil {
++			t.Fatalf("ato %s accepted", ato)
++		}
++	}
++}
++
++func TestValidateRepeatRule(t *testing.T) {
++	rule := func(change string) json.RawMessage {
++		base := `"rrv":4,"tp":0,"fu":256,"fa":1,"ia":1904256000,"sr":1904256000,"rc":0,"ts":0,"ed":64092211200`
++		if change == "" {
++			change = `"of":[{"wd":4}]`
++		}
++		return json.RawMessage("{" + base + "," + change + "}")
++	}
++	if err := validateRepeatRule(rule("")); err != nil {
++		t.Fatalf("weekly rule rejected: %v", err)
++	}
++	for name, raw := range map[string]json.RawMessage{
++		"two offsets":      rule(`"of":[{"wd":4},{"wd":5}]`),
++		"weekday 7":        rule(`"of":[{"wd":7}]`),
++		"day for weekly":   rule(`"of":[{"dy":3}]`),
++		"extra key":        rule(`"of":[{"wd":4}],"xx":1`),
++		"version 3":        json.RawMessage(`{"rrv":3,"tp":0,"fu":256,"fa":1,"of":[{"wd":4}],"ia":1904256000,"sr":1904256000,"rc":0,"ts":0,"ed":64092211200}`),
++		"early start":      json.RawMessage(`{"rrv":4,"tp":0,"fu":256,"fa":1,"of":[{"wd":4}],"ia":1904256000,"sr":1904256000,"rc":0,"ts":-3,"ed":64092211200}`),
++		"end date":         json.RawMessage(`{"rrv":4,"tp":0,"fu":256,"fa":1,"of":[{"wd":4}],"ia":1904256000,"sr":1904256000,"rc":0,"ts":0,"ed":1904256000}`),
++		"anchor before sr": json.RawMessage(`{"rrv":4,"tp":0,"fu":256,"fa":1,"of":[{"wd":4}],"ia":1904169600,"sr":1904256000,"rc":0,"ts":0,"ed":64092211200}`),
++		"not midnight":     json.RawMessage(`{"rrv":4,"tp":0,"fu":256,"fa":1,"of":[{"wd":4}],"ia":1904256001,"sr":1904256000,"rc":0,"ts":0,"ed":64092211200}`),
++		"not an object":    json.RawMessage(`true`),
++	} {
++		if err := validateRepeatRule(raw); err == nil {
++			t.Fatalf("%s accepted", name)
++		}
++	}
++}
+diff --git a/task_read.go b/task_read.go
+index a13b3d5..815656e 100644
+--- a/task_read.go
++++ b/task_read.go
+@@ -10,7 +10,7 @@ import (
+ 
+ // TaskReplayVersion identifies the task read semantics used to build derived
+ // state. Cached state from older generations must be replayed from scratch.
+-const TaskReplayVersion = 3
++const TaskReplayVersion = 8
+ 
+ // UnsupportedTaskKindError means the task state would be incomplete if replay
+ // continued. ServerIndex is -1 when the source did not provide an index.
+@@ -43,7 +43,7 @@ func taskKindDiagnostic(value ItemKind) string {
+ func ValidateTaskReadKinds(items []Item) error {
+ 	for _, item := range items {
+ 		switch item.Kind {
+-		case ItemKindTask, ItemKindTask7, ItemKindTask4, ItemKindTask3, ItemKindTaskPlain:
++		case ItemKindTask, ItemKindTask7, ItemKindTask4, ItemKindTask3, ItemKindTask2, ItemKindTaskPlain:
+ 			continue
+ 		}
+ 		if strings.HasPrefix(string(item.Kind), "Task") {
+@@ -63,6 +63,9 @@ func ValidateTaskReadKinds(items []Item) error {
+ type TaskReadPayload struct {
+ 	TaskActionItemPayload
+ 	nullFields map[string]bool
++	// repeatRule is the rr object as Things wrote it; the typed Repeater
++	// drops properties it does not know.
++	repeatRule json.RawMessage
+ }
+ 
+ // DecodeTaskReadPayload distinguishes an omitted property (preserve existing
+@@ -85,6 +88,9 @@ func DecodeTaskReadPayload(raw json.RawMessage) (TaskReadPayload, error) {
+ 			return result, err
+ 		}
+ 	}
++	if rule := bytes.TrimSpace(fields["rr"]); len(rule) > 0 && rule[0] == '{' {
++		result.repeatRule = append(json.RawMessage(nil), rule...)
++	}
+ 	for key, value := range fields {
+ 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+ 			if result.nullFields == nil {
+@@ -179,6 +185,21 @@ func (p TaskReadPayload) ApplyNulls(task *Task) {
+ 			task.DelegateIDs = nil
+ 		case "nt":
+ 			task.Note = ""
++		case "tir":
++			task.TodayIndexReferenceDate = nil
++		case "rr":
++			task.IsRepeatingTemplate = false
++			task.RepeatRule = nil
++		case "sb":
++			task.Evening = false
+ 		}
+ 	}
+ }
++
++// ApplyRaw keeps what the typed payload does not hold exactly: the repeat
++// rule (rr) as Things wrote it. Call it after the ordinary fields.
++func (p TaskReadPayload) ApplyRaw(task *Task) {
++	if p.repeatRule != nil {
++		task.RepeatRule = append(json.RawMessage(nil), p.repeatRule...)
++	}
++}
+diff --git a/task_write.go b/task_write.go
+index 922b830..61f7ecf 100644
+--- a/task_write.go
++++ b/task_write.go
+@@ -14,8 +14,14 @@ import (
+ 
+ type task7WritePlan struct {
+ 	modificationTargets map[string]struct{}
+-	creationTargets     map[string]struct{}
+-	tombstoneTargets    map[string]struct{}
++	// modificationKeys holds the payload keys of each target's modification;
++	// the preflight allows fewer of them on repeating templates.
++	modificationKeys map[string]map[string]struct{}
++	creationTargets  map[string]struct{}
++	tombstoneTargets map[string]struct{}
++	// deletionTargets are deleted with action 2 and an empty payload, as
++	// Things deletes headings and emptied Trash items.
++	deletionTargets map[string]struct{}
+ }
+ 
+ func (p *task7WritePlan) needsPreflight() bool { return len(p.modificationTargets) != 0 }
+@@ -27,8 +33,10 @@ func validateTaskWrites(body []byte) (*task7WritePlan, error) {
+ 	}
+ 	plan := &task7WritePlan{
+ 		modificationTargets: make(map[string]struct{}),
++		modificationKeys:    make(map[string]map[string]struct{}),
+ 		creationTargets:     make(map[string]struct{}),
+ 		tombstoneTargets:    make(map[string]struct{}),
++		deletionTargets:     make(map[string]struct{}),
+ 	}
+ 	type tombstoneEnvelope struct {
+ 		kind string
+@@ -76,6 +84,17 @@ func validateTaskWrites(body []byte) (*task7WritePlan, error) {
+ 				err = validateTask7Modification(payload)
+ 				if err == nil {
+ 					plan.modificationTargets[id] = struct{}{}
++					keys := make(map[string]struct{}, len(payload))
++					for key := range payload {
++						keys[key] = struct{}{}
++					}
++					plan.modificationKeys[id] = keys
++				}
++			case int64(ItemActionDeleted):
++				if len(payload) != 0 {
++					err = fmt.Errorf("delete payload must be empty")
++				} else {
++					plan.deletionTargets[id] = struct{}{}
+ 				}
+ 			default:
+ 				err = fmt.Errorf("Task7 action %d is outside the verified write scope", action)
+@@ -93,12 +112,17 @@ func validateTaskWrites(body []byte) (*task7WritePlan, error) {
+ 			}
+ 		}
+ 	}
+-	if len(plan.creationTargets)+len(plan.modificationTargets) != 0 {
++	if len(plan.creationTargets)+len(plan.modificationTargets)+len(plan.deletionTargets) != 0 {
+ 		for _, tombstone := range tombstones {
+ 			target, err := validateTask7CompanionTombstone(tombstone.raw, tombstone.kind)
+ 			if err != nil {
+ 				return nil, fmt.Errorf("refusing to write Task7 batch: invalid tombstone companion")
+ 			}
++			// Next to deletions, a tombstone may only name an item deleted in
++			// the same commit, as Things writes them when it empties the Trash.
++			if _, deleted := plan.deletionTargets[target]; len(plan.deletionTargets) != 0 && !deleted {
++				return nil, fmt.Errorf("refusing to write Task7 batch: tombstone for an item not deleted in this commit")
++			}
+ 			plan.tombstoneTargets[target] = struct{}{}
+ 		}
+ 	}
+@@ -204,7 +228,21 @@ func validateTask7Create(p map[string]json.RawMessage) error {
+ 			return fmt.Errorf("create sr and tir must have the same date")
+ 		}
+ 	}
+-	for _, key := range []string{"dds", "rmd", "lai", "md", "ato", "icsd", "rp", "acrd", "sp", "rr"} {
++	if !jsonNull(p["rr"]) || !jsonNull(p["icsd"]) {
++		// A repeating template: the rule, the day its next to-do is due
++		// (icsd), Someday (st 2) and no start date, as Things creates one.
++		if err := validateRepeatRule(p["rr"]); err != nil {
++			return fmt.Errorf("create rr %w", err)
++		}
++		icsd, ok := jsonInteger(p["icsd"])
++		if !ok || icsd <= 0 || icsd%86400 != 0 {
++			return fmt.Errorf("create icsd must be a day with rr")
++		}
++		if tp != 0 || st != 2 || !srNull {
++			return fmt.Errorf("create of a repeating template must be a to-do with st 2 and no start date")
++		}
++	}
++	for _, key := range []string{"dds", "rmd", "lai", "md", "ato", "rp", "acrd", "sp"} {
+ 		if !jsonNull(p[key]) {
+ 			return fmt.Errorf("create %s must be null", key)
+ 		}
+@@ -238,6 +276,7 @@ func validateTask7Create(p map[string]json.RawMessage) error {
+ var task7ModificationKeys = map[string]struct{}{
+ 	"md": {}, "tt": {}, "nt": {}, "st": {}, "sr": {}, "tir": {}, "dd": {}, "ar": {},
+ 	"pr": {}, "agr": {}, "tg": {}, "ss": {}, "sp": {}, "tr": {}, "ix": {}, "ti": {}, "do": {},
++	"sb": {}, "ato": {},
+ }
+ 
+ func validateTask7Modification(p map[string]json.RawMessage) error {
+@@ -267,8 +306,24 @@ func validateTask7Modification(p map[string]json.RawMessage) error {
+ 	}
+ 	if raw, ok := p["ss"]; ok {
+ 		value, ok := jsonInteger(raw)
+-		if !ok || (value != 0 && value != 3) {
+-			return fmt.Errorf("modification ss must be 0 or 3")
++		// 0 open, 2 canceled, 3 completed.
++		if !ok || (value != 0 && value != 2 && value != 3) {
++			return fmt.Errorf("modification ss must be 0, 2 or 3")
++		}
++	}
++	// ato is a reminder, seconds after midnight of the start date; null
++	// removes it.
++	if raw, ok := p["ato"]; ok && !jsonNull(raw) {
++		value, ok := jsonInteger(raw)
++		if !ok || value < 0 || value > 86399 {
++			return fmt.Errorf("modification ato must be null or 0..86399")
++		}
++	}
++	// sb 1 puts a Today to-do under This Evening, sb 0 takes it back.
++	if raw, ok := p["sb"]; ok {
++		value, ok := jsonInteger(raw)
++		if !ok || (value != 0 && value != 1) {
++			return fmt.Errorf("modification sb must be 0 or 1")
+ 		}
+ 	}
+ 	ssRaw, hasStatus := p["ss"]
+@@ -281,15 +336,20 @@ func validateTask7Modification(p map[string]json.RawMessage) error {
+ 		if status == 0 && !jsonNull(spRaw) {
+ 			return fmt.Errorf("modification ss 0 requires null sp")
+ 		}
+-		if status == 3 {
++		if status == 2 || status == 3 {
+ 			if jsonNull(spRaw) || requiredTimestamp(spRaw, true) != nil {
+-				return fmt.Errorf("modification ss 3 requires a positive sp timestamp")
++				return fmt.Errorf("modification ss %d requires a positive sp timestamp", status)
+ 			}
+ 		}
+ 	}
+ 	_, hasSchedule := p["st"]
+ 	_, hasStartDate := p["sr"]
+ 	_, hasTodayReference := p["tir"]
++	if isTodayReorder(p) {
++		// Things itself writes ti with tir, without st and sr, when a to-do is
++		// dragged next to one that entered Today on another day.
++		hasTodayReference = false
++	}
+ 	if hasSchedule || hasStartDate || hasTodayReference {
+ 		if !hasSchedule || !hasStartDate || !hasTodayReference {
+ 			return fmt.Errorf("modification st, sr, and tir must be written together")
+@@ -340,6 +400,18 @@ func validateTask7Modification(p map[string]json.RawMessage) error {
+ 	return nil
+ }
+ 
++// isTodayReorder reports a modification that only moves a to-do within
++// Today: md, ti and a non-null tir.
++func isTodayReorder(p map[string]json.RawMessage) bool {
++	if len(p) != 3 {
++		return false
++	}
++	_, hasMD := p["md"]
++	_, hasTI := p["ti"]
++	tir, hasTIR := p["tir"]
++	return hasMD && hasTI && hasTIR && !jsonNull(tir)
++}
++
+ func validateFullTextNote(raw json.RawMessage) error {
+ 	note, err := jsonObject(raw)
+ 	if err != nil {
+diff --git a/types.go b/types.go
+index c0fbffb..3920bf1 100644
+--- a/types.go
++++ b/types.go
+@@ -64,6 +64,7 @@ var (
+ 	// ItemKindTask remains Task6 for compatibility with existing callers.
+ 	ItemKindTask7     ItemKind = "Task7"
+ 	ItemKindTask4     ItemKind = "Task4"
++	ItemKindTask2     ItemKind = "Task2"
+ 	ItemKindTask3     ItemKind = "Task3"
+ 	ItemKindTaskPlain ItemKind = "Task"
+ 	// ItemKindArea identifies an Area in the legacy Area2 encoding.
+@@ -80,6 +81,7 @@ var (
+ 	// ItemKindTag identifies a Tag
+ 	ItemKindTag            ItemKind = "Tag3"
+ 	ItemKindTag4           ItemKind = "Tag4"
++	ItemKindTag2           ItemKind = "Tag2"
+ 	ItemKindTagPlain       ItemKind = "Tag"
+ 	ItemKindTombstone      ItemKind = "Tombstone2"
+ 	ItemKindTombstonePlain ItemKind = "Tombstone"
+@@ -211,6 +213,19 @@ type Task struct {
+ 	TagIDs           []string
+ 	RecurrenceIDs    []string
+ 	DelegateIDs      []string
++	// IsRepeatingTemplate reports whether the task carries a repeat rule (rr).
++	// Things lists such templates in Upcoming, not in their own schedule list.
++	IsRepeatingTemplate bool
++	// TodayIndexReferenceDate (tir) is the day the task entered Today; Things
++	// orders Today by it together with TodayIndex. For repeating templates it
++	// is the next occurrence.
++	TodayIndexReferenceDate *time.Time
++	// Evening (sb 1) puts a Today to-do under "This Evening".
++	Evening bool
++	// RepeatRule is the repeat rule (rr) of a repeating template as Things
++	// wrote it, e.g. {"fu":256,"fa":1,"of":[{"wd":5}],"tp":0,...}; nil
++	// otherwise.
++	RepeatRule json.RawMessage `json:",omitempty"`
+ }
+ 
+ // TaskActionItemPayload describes the payload for modifying Tasks, and also Projects,
+@@ -342,8 +357,12 @@ type Setting struct{}
+ type Area struct {
+ 	UUID  string
+ 	Title string
++	Index int
+ 	Tags  []*Tag
+-	Tasks []*Task
++	// TagIDs are the area's tags (tg of Area3), kept in the state so
++	// readers can tell which tags an area carries.
++	TagIDs []string
++	Tasks  []*Task
+ }
+ 
+ // AreaActionItemPayload describes the payload for modifying Areas

@@ -1,0 +1,281 @@
+# NubeRerum — full reference
+
+Revision: bb3357bdc159e699f83f1ceb80c6245969d3b0ba
+Generated from: cmd/nubererum/*.go, cmd/nubererum/*_test.go, public/*, tests/*, playwright.config.js, package.json, go.mod, Dockerfile, compose.yaml, .env.example, scripts/*, patches/things-cloud-sdk-arthursoares.patch, docs/*.
+Authority order: source + tests > operator docs (README, DEPLOYMENT, SECURITY, PARITY_TESTING) > generated summaries (this file, llms.txt, docs/repository-map.json, AGENTS.md block, docs/index|setup|api|architecture|testing|limitations.md).
+
+================================================================================
+1. WHAT IT IS
+================================================================================
+NubeRerum is a small self-hosted web app for Things 3 tasks in Things Cloud. It runs in Docker on a home server and does not need a Mac that is always running.
+
+Cultured Code does not publish a Things Cloud API. The Go server runs the reverse-engineered `things-cli` from arthursoares/things-cloud-sdk (release v0.6.0, plus patches/things-cloud-sdk-arthursoares.patch) as a child process and reads the CLI's state cache.
+
+Capabilities:
+- Lists: Inbox, Today, Upcoming, Anytime, Someday (membership and order follow Things), Logbook and Trash.
+- Sidebar ordered like Things: projects without an area, then areas with their active projects. Someday and Upcoming projects appear at the top of those lists.
+- Projects grouped by heading; lists grouped by area and project; Upcoming by day.
+- Create to-dos in every list, project and area (new to-dos go to the top; Upcoming asks for a start date), projects in an area, headings, areas and tags.
+- Editor: title, notes, checklist (add, edit, tick, delete, reorder), when, deadline, tags.
+- Complete and reopen; completed to-dos stay in their list until "Log Completed" (or Things' daily logging); trash and restore.
+- Selection (click, Shift, Ctrl/Cmd), keyboard shortcuts after Things for Mac with a cheat sheet, Move dialog, navigation popover, duplicate, copy and paste, drag and drop (reorder to-dos, checklist items, projects, areas; move selected to-dos onto a project, area, heading, Today, Anytime or Someday; move projects between areas), long press on touch screens.
+- Notes with clickable links; search; web app manifest and icons.
+- Docker Compose deployment; Basic Auth (LAN) or passkeys (internet).
+
+Designed for one owner. Internet access only with passkeys behind a TLS reverse proxy.
+
+================================================================================
+2. TECHNOLOGY & DEPENDENCIES
+================================================================================
+- Go module `nubererum`, `go 1.26.4`. One direct dependency: github.com/go-webauthn/webauthn v0.18.2.
+- Runtime dependency: `things-cli`, built from arthursoares/things-cloud-sdk at tag v0.6.0 (Dockerfile ARG THINGS_SDK_VERSION) and checked against commit THINGS_SDK_COMMIT, with the patch applied. Built by the Dockerfile or scripts/build-things-cli.sh (bin/things-cli), which reads version and commit from the Dockerfile.
+- The patch adds: reading Task2/Tag2 histories; local-day Today including past start dates; no canceled tasks in lists; applying deletes of areas, checklist items and tags that Things writes with an empty payload; IsRepeatingTemplate (rr), TodayIndexReferenceDate (tir), area Index (ix); Things logbook settings (ld, li) in the cache; batch operations reorder, area-reorder, reopen, restore, move, unfile, schedule, deadline, tags, log-completed, checklist-add/edit/complete/reorder/delete, and create with index/todayIndex; the write preflight lets instances of repeating to-dos take every change and templates only title, notes and Trash.
+- Frontend: static files in public/ (vanilla JS, HTML, CSS; no build step).
+- Node.js tooling (tests only): node >= 18; devDependency @playwright/test 1.61.0.
+- Docker: golang:1.26-alpine build stage (app + things-cli) -> alpine:3.22 runtime with ca-certificates and tzdata; non-root user `app` (uid 10001); exposes 4173.
+
+================================================================================
+3. ARCHITECTURE
+================================================================================
+Files in cmd/nubererum/:
+- main.go — main(), apiHandler (status, login, logout, sync, complete, create inline), CLI adapter (cliPath, runCLI*, cliEnv, readWithRetry), sync model (syncModel, syncModelFromCache, stateViews, projectWhen, logbookRule, applyVisibleTaskFilter, applyCLIToday, sortTasks), staticHandler.
+- modelcache.go — in-memory model cache.
+- writes.go — writeMu, retryable, withWriteRetry, /api/move.
+- edits.go — writePaths, /api/update, /api/checklist, /api/trash, /api/restore, /api/reopen, /api/cancel, /api/log-completed, create helpers (topPositions, newModelTask).
+- details.go — /api/schedule, /api/deadline, /api/tags, /api/tag-create, /api/area-create, /api/project-area, heading placement.
+- reorder.go — planReorder, /api/reorder, runCLIBatch.
+- archive.go — /api/logbook, /api/trash, /api/search, /api/empty-trash.
+- security.go — validateSecurityConfig, Basic Auth + lockout, httpsOnly, securityHeaders, sameOriginGuard, validThingsID, safeCLIValue, server timeouts, appHandler.
+- passkey.go — WebAuthn relying parties, sessions, setup codes, /auth/*, /login, passkey-* subcommands.
+- compress.go — gzip. logging.go — slog setup, redact, logErrors, /api/client-error.
+
+Middleware (outer to inner):
+- basic:   securityHeaders -> httpsOnly -> basicAuth -> gzipResponses -> logErrors -> sameOriginGuard -> mux
+- passkey: securityHeaders -> httpsOnly -> gzipResponses -> logErrors -> sameOriginGuard -> passkeys.middleware -> mux
+
+Things account (session):
+- One account per process, in memory, under sync.RWMutex.
+- From env via firstEnv: THINGS_USERNAME (fallback THINGS_EMAIL); THINGS_PASSWORD (fallbacks THINGS_TOKEN, THINGS_CLOUD_PASSWORD). Then "server managed": /api/login and /api/logout return 403, and main() starts a warm-up sync.
+- Otherwise POST /api/login checks the account with `things-cli today` before storing it; a rejected login creates no session.
+
+CLI invocation safety:
+- exec.Command(cli, args...) — argument vector, no shell. Batch ops as JSON on stdin of `things-cli batch`.
+- The account reaches the CLI only via child env vars THINGS_USERNAME, THINGS_PASSWORD, THINGS_TOKEN, THINGS_CLI_CACHE.
+- IDs must match ^[A-Za-z0-9][A-Za-z0-9-]{0,63}$; titles/notes/names starting with "--" are rejected.
+
+State cache:
+- Written by things-cli; read by the app (sync, Logbook, Trash).
+- Path: THINGS_CLI_CACHE, else DATA_DIR/things-cli-state-v8.json, else <app root>/things-cli-state-v8.json; directory created 0700.
+- Fields used: historyId, serverIndex, state.{Areas, Tasks, Tags, CheckListItems, LogDate, LogInterval}.
+- Task Type 0 = to-do, 1 = project, 2 = heading. Open = Status 0, not InTrash, no CompletionDate. Status 2 = canceled, 3 = completed.
+- When the CLI state format changes, the file name changes (-vN) so old caches are rebuilt.
+
+Sync pipeline (syncModel):
+1. `things-cli list` -> open to-dos (skips completed, canceled, trashed).
+2. `things-cli today` -> Today membership (CLI order).
+3. syncModelFromCache -> areas, tags, open projects (with `when`: anytime|someday|upcoming), headings of open projects, checklists, and to-dos: open ones plus completed/canceled ones not yet logged (logbookRule: li 1 daily = completed today after the last Log Completed; li 2 manual = all after it; li 0 = none). Lists per to-do from stateViews:
+   - inbox: Schedule 0, not repeating.
+   - upcoming: start date after today, or repeating template.
+   - someday: Schedule 2, no start date, not in a project, not repeating.
+   - anytime: Schedule 1, started, project started, not repeating.
+4. applyVisibleTaskFilter -> keep only to-dos `list` returned plus completed ones; recount projects/areas.
+5. applyCLIToday -> Today = exactly the `today` rows, plus completed to-dos in Today by date that are not logged.
+6. sortTasks -> loose to-dos first, then by area and project position; Today by the day a to-do entered Today (newest first), then todayIndex; other lists by heading and index; Upcoming by start date.
+Read commands retry once after a failed name lookup or refused connection.
+
+Today invariant: membership comes only from `things-cli today`. Cache Today markers (TodayIndex, TodayIndexReferenceDate) only order rows. Exception: completed to-dos not yet logged keep their place.
+
+Model cache (modelcache.go):
+- GET /api/sync answers from the cached model; older than 30 s -> background sync, response `refreshing: true`.
+- GET /api/sync?fresh=1 waits for a sync that started after the last write.
+- Write preflight: the SDK checks each modified target against the whole history (~30 s for ~253k items). In serve mode the index is kept (KeepPreflightIndex) and warmed at start; later writes read only new items (~0.2 s).
+- /api/create answers after the create; the move to the top runs in the background (skipped with placed:true).
+- cliworker.go: one long-running `things-cli serve` process runs all commands in order (signed in once, state in memory); sync = list + offline today. THINGS_CLI_WORKER=0 or a CLI without serve mode: one process per command.
+- One sync at a time. After a write, models.wrote(edit) patches a copy of the model and starts a sync (or queues one after the running sync).
+- Login/logout reset the cache and discard a running sync.
+
+Writes:
+- Commands: `things-cli batch` (create, reorder, area-reorder, move, move-to-project, move-to-area, edit when/heading, unfile, schedule, deadline, tags, trash, restore, reopen, log-completed, checklist-*), `things-cli edit <uuid> --title --note`, `things-cli complete <uuid>`, `things-cli create-tag <title>`, `things-cli create-area <title>`.
+- writeMu: one write at a time (Things Cloud answers parallel writes with 409 OutdatedAncestor).
+- withWriteRetry: up to 3 retries after 1, 2, 4 s, only for OutdatedAncestor, failed name lookups and refused connections; never after timeouts.
+- Most handlers check the cached model first and return 409 "… changed. Refresh and try again." when an item is missing.
+- planReorder: new position between the neighbours (gap 512); renumber the section only without room; in Today write todayIndex and, when the day changes, todayDate.
+- APP_READ_ONLY=1 (or true/yes): every path in writePaths returns 403.
+
+Frontend (public/app.js):
+- Load: GET /api/status, then GET /api/sync; if the answer is refreshing or older than 30 s, GET /api/sync?fresh=1. Refresh when visible again after 1 minute and every 5 minutes while visible.
+- Optimistic changes with rollback on failure; new to-dos at the top; completed to-dos greyed until logged.
+- Shortcuts (public/shortcuts.js, loaded before app.js): after Things for Mac; Mod = Cmd on a Mac, Ctrl elsewhere; matched by event.code. n new to-do, Space new to-do below the selection, paste adds one to-do per line, Enter open, Esc close/clear, Mod+K complete, Mod+D duplicate, Mod+C copy titles, Mod+Shift+Y log completed, Delete/Backspace trash (with Undo), arrows/Shift/Alt/Mod+A select, Mod+arrows move, Mod+Shift+M Move dialog, Mod+T/R/O Today/Anytime/Someday, Ctrl+]/[ start date +/-1 day (Shift: week), Ctrl+./, deadline +/-1 day (Shift: week), Mod+Shift+T tags, 1-6 and Mod+1-6 lists (Inbox, Today, Upcoming, Anytime, Someday, Logbook), Mod+Shift+O navigation popover, Mod+L show in parent, Mod+Left back, Mod+/ sidebar, / and Mod+F search, r refresh. Combinations browsers keep (Mod+N/T/W and Shift variants) also work with Alt. ? or "Shortcuts" in the sidebar opens a cheat sheet generated from the same table; unavailable Things shortcuts (This Evening, cancel, repetition, Markdown) are greyed out.
+- Drag and drop with pointer events; on touch screens a long press (450 ms) selects or starts a drag.
+- Notes rendered as text; http(s):// and www. links become anchors with rel="noopener noreferrer"; other schemes refused.
+- Browser errors and failed requests go to POST /api/client-error (at most 20 per page).
+- localStorage keeps only the last opened list ("things-view"); credentials are never stored in the browser.
+- Passkey mode: a 401 with `login` sends the page to /login; a "Passkeys" sidebar link opens /login?account. public/login.js runs the WebAuthn ceremonies.
+
+================================================================================
+4. HTTP API
+================================================================================
+Common:
+- JSON responses: application/json, Cache-Control no-store, gzip when accepted.
+- State changes: POST only, Content-Type application/json, Origin/Referer host = request host or APP_PUBLIC_ORIGINS, no cross-site Sec-Fetch-Site; body <= 64 KiB. Other methods than GET/HEAD/POST -> 405.
+- Error envelope: {"error": "<message>"}.
+- (write) = rejected with 403 when APP_READ_ONLY is set.
+
+GET  /api/status   -> {signedIn, email, serverManaged, auth:"basic"|"passkey", backend:{mode:"things-cli"|"missing-cli", cli:<base name or "">, nativeFallback:false, directCloud:true}}
+POST /api/login    {email,password} -> 200 {signedIn:true,email,backend} | 400 empty | 403 server managed | 424 no CLI | 502 CLI error (no session)
+POST /api/logout   -> 200 {signedIn:false} | 403 server managed
+GET  /api/sync[?fresh=1] -> {generatedAt, syncedAt, refreshing, syncError?, source:<full CLI path>, stats:{tasks,projects,areas,rawEvents}, tasks[], projects[], areas[], headings[], tags[], lists:{inbox,today,upcoming,anytime,someday}}
+     Task: uuid,title,note,status(open|completed|canceled),type,schedule,views[],scheduledDate,deadline,modificationDate,project,projectTitle,heading,headingTitle,area,areaTitle,tags[],tagIDs[],checklist[{uuid,title,done,index}],index,todayIndex,todayDate,areaIndex,projectIndex,headingIndex,evening,repeat (rule summary; the template's for an instance).
+     Project: uuid,title,type,count,index,area,when,scheduledDate,deadline,tags,tagIDs,status(open|completed|canceled; finished ones stay until logged),done,total (progress). Area: uuid,title,type,count,index. Heading: uuid,title,project,index. Tag: uuid,title,index.
+GET  /api/logbook, /api/trash [?limit=1..2000, default 300] -> {items:[{uuid,title,type(task|project),status,completedAt,modifiedAt,project,projectTitle,areaTitle}], total}. Read from the cache file.
+GET  /api/search?q=(2..200 chars) -> {items (archive rows, <=100, newest first), total}; logged to-dos/projects whose title or notes contain q; no Trash, nothing still listed
+POST /api/create (write) {type:task|project|heading, title<=500, note<=5000, when:inbox|today|anytime|someday, scheduled:YYYY-MM-DD, project, heading, area}
+     Defaults: when=inbox (task) or anytime (project/heading); none if scheduled. Projects: area only. Headings: project only. A new to-do gets a second reorder write to the top. -> {created:true, when, type, uuid, task|null}
+POST /api/complete (write) {uuid} -> {completed:true, uuid}
+POST /api/reopen (write) {uuid} -> {ok:true}
+POST /api/cancel (write) {uuids:[...]} (1-100) -> {ok:true}; batch cancel (ss 2, sp now); stays as canceled until Log Completed
+POST /api/log-completed (write) {} -> {ok:true}
+POST /api/update (write) {uuid, title?<=500 non-empty, note?<=5000} -> {updated:true}
+POST /api/checklist (write) {action:add|edit|complete|delete|reorder, task, uuid, title<=500, done, order[]} -> {ok:true, uuid}
+POST /api/trash, /api/restore (write) {uuids[1..100]} -> {ok:true, count}. A project uuid also trashes/restores the project's to-dos.
+POST /api/schedule (write) {uuids[1..100], when:today|anytime|someday|inbox XOR startDate:YYYY-MM-DD} -> {ok:true}
+POST /api/deadline (write) {uuid, deadline:YYYY-MM-DD or ""} -> {ok:true}
+POST /api/tags (write) {uuid, tags:[tag uuids <=50]} (replaces; to-do, project or area: batch `area-tags`, Area3 {tg}) -> {ok:true}
+POST /api/heading-delete (write) {uuid} -> {ok:true,todos:N}; its to-dos move to the project root, then the heading is deleted (Task7 action 2 {}); rename headings with /api/update
+POST /api/area-delete (write) {uuid} -> {ok:true,trashed:[uuids],count:N}; its projects and to-dos (and the projects' to-dos) go to the Trash, then the area is deleted (Area3 action 2 {}); restoring trashed does not bring the area back
+POST /api/empty-trash (write) -> {ok:true,deleted:N}; every Trash item (and the to-dos and headings of trashed projects) gets Task7 action 2 {} plus a Tombstone2, children first, 50 items per write; cannot be undone
+POST /api/reminder (write) {uuid, time:"HH:MM"|""} -> {ok:true}; ato with the start date (today for Today/Evening, else the Upcoming date; no date -> 400); "" removes it; model to-dos carry reminder:"HH:MM"|""
+POST /api/repeat (write) {uuid, type:fixed|after, unit:day|week|month|year, every:1..99, month?:day|last|weekday, start:YYYY-MM-DD} -> {ok:true,uuid:template}; creates a repeating template (rr v4, ia=start, sr=today, icsd=start, st 2) with the to-do's title/notes/project/area/heading/tags and trashes the original; Things apps create the instances
+POST /api/tag-rename (write) {uuid, title<=200} -> {ok:true}; Tag4 {tt}
+POST /api/tag-delete (write) {uuid} -> {ok:true}; Tag4 action 2 {}; items keep the id, the model drops unknown ids
+POST /api/convert-project (write) {uuid} -> {ok:true,uuid:project,todos:N}; project with the to-do's title/notes/area/when/deadline/tags, checklist items become its to-dos (done ones completed), then the original goes to the Trash; 3 batches, stops on a failed step (502)
+POST /api/project-complete (write) {uuid, mode:complete|cancel, rest?:complete|cancel} -> {ok:true,todos:N}; open to-dos (and their checklists when completing) first, then the project
+Schedule/deadline/tags also take a single project uuid (projects: no inbox, no evening).
+POST /api/tag-create, /api/area-create (write) {title<=200} -> {ok:true, uuid, title}
+POST /api/move (write) {uuids[1..100]} + exactly one of project | area | heading | when:today|anytime|someday -> {moved:N}. Inbox to-dos moved to a project/area/heading go to Anytime; otherwise the schedule is kept.
+POST /api/reorder (write) {view:today|projects|areas|<list>, moved, order[2..1000]} -> {reordered:true, writes:N}
+POST /api/project-area (write) {uuid, area or ""} -> {ok:true}
+POST /api/client-error {message,source,line,stack,context,page} -> 204; at most 60 logged per minute; not affected by APP_READ_ONLY.
+
+Passkey mode only:
+GET  /login (page), /login?account (account page)
+GET  /auth/status -> {mode:"passkey", authenticated, registered, passkey?}
+POST /auth/login/begin -> {ceremony, options}; POST /auth/login/finish {ceremony, credential} -> {authenticated:true} + cookie
+POST /auth/register/begin {setupCode?, name?} (needs session or setup code) -> {ceremony, options}; POST /auth/register/finish {ceremony, credential} -> {registered:true, name, id}
+POST /auth/logout -> {authenticated:false}
+Unauthenticated /api/* -> 401 {"error":"Sign in with your passkey.","login":"/login"}; pages redirect to /login.
+
+Static: other paths from public/ (index.html, app.js, shortcuts.js, styles.css, login.html, login.js, manifest.webmanifest, icons); paths leaving public/ -> 403; unknown paths -> index.html.
+
+Status codes: 400 invalid input; 401 no account / no session / Basic Auth; 403 read-only, server-managed login/logout, same-origin guard, traversal, unknown passkey origin, wrong setup code; 404 unknown API route; 405 method; 409 model changed, refresh; 415 not JSON; 424 no things-cli; 429 sign-in lockout; 500 unexpected error or panic; 502 things-cli failed or printed non-JSON.
+
+================================================================================
+5. CONFIGURATION (environment variables)
+================================================================================
+PORT                 default 4173
+HOST                 default 127.0.0.1
+APP_AUTH             default basic; basic|passkey (anything else stops the start)
+APP_USERNAME         default admin; Basic Auth user; passkey user name
+APP_PASSWORD         enables Basic Auth; required (>= 16 chars) off loopback in basic mode; ignored in passkey mode
+APP_PUBLIC_ORIGINS   extra origins for the same-origin guard; passkey origins if APP_PASSKEY_ORIGINS is unset
+APP_PASSKEY_ORIGINS  (or APP_PASSKEY_ORIGIN) passkey origins, comma separated; https, or http://localhost
+APP_READ_ONLY        1|true|yes -> write endpoints return 403
+THINGS_USERNAME      Things email (fallback THINGS_EMAIL)
+THINGS_PASSWORD      Things password (fallbacks THINGS_TOKEN, THINGS_CLOUD_PASSWORD)
+DATA_DIR             default app root; cache, passkeys.json, passkey-setup.json
+THINGS_CLI_CACHE     default DATA_DIR/things-cli-state-v8.json
+THINGS_CLOUD_CLI     explicit things-cli path
+TZ                   decides which day is "today"
+
+CLI discovery (cliPath): THINGS_CLOUD_CLI -> <root>/bin/things-cli -> /usr/local/bin/things-cli -> PATH things-cli. App root = executable dir if it has public/index.html, else working dir.
+
+compose.yaml: HOST=0.0.0.0, PORT=4173, TZ=${TZ:-Europe/Berlin}, DATA_DIR=/data, THINGS_CLI_CACHE=/data/things-cli-state-v8.json, APP_USERNAME=${APP_USERNAME:-admin}, APP_AUTH=${APP_AUTH:-basic}; APP_PASSWORD optional (the app refuses basic mode off loopback without 16+ chars); THINGS_USERNAME, THINGS_PASSWORD required; APP_PUBLIC_ORIGINS, APP_PASSKEY_ORIGINS optional. Volume things-data -> /data. Read-only root, /tmp tmpfs, cap_drop ALL, no-new-privileges, pids 128, memory 512m, logs 3 x 10m. Port 4173.
+.env.example: APP_USERNAME, APP_PASSWORD, commented APP_AUTH/APP_PUBLIC_ORIGINS, THINGS_USERNAME, THINGS_PASSWORD, TZ.
+
+================================================================================
+6. COMMANDS
+================================================================================
+Build app:        go build -o nubererum ./cmd/nubererum
+Build CLI:        scripts/build-things-cli.sh
+Run (local):      ./scripts/start-nubererum.sh    (builds bin/things-cli on first start; HOST=0.0.0.0 by default)
+Docker up:        docker compose up -d --build
+Docker down:      docker compose down
+Docker logs:      docker compose logs -f nubererum
+Passkeys:         docker exec nubererum nubererum passkey-setup | passkey-list | passkey-remove <id>
+All checks:       scripts/check.sh [--race]   (Go in a container, parity, Playwright)
+Go vet/tests:     go vet ./... && go test ./...
+Without local Go: docker run --rm -v "$PWD":/src -w /src golang:1.26-alpine sh -c 'gofmt -l . ; go vet ./... && go test -count=1 ./...'
+Playwright deps:  npm install && npx playwright install chromium
+Playwright:       npm run test:e2e
+Passkey e2e:      PASSKEY_CONTAINER=<name> npx playwright test tests/passkey.spec.js
+Parity unit:      npm run test:parity
+Parity live:      npm run compare:parity -- --reference .things-parity/reference.json
+
+================================================================================
+7. TESTING
+================================================================================
+A. Go tests (cmd/nubererum/*_test.go) — go test ./...
+   Stand-in shell scripts replace things-cli; no test contacts Things Cloud.
+   main_test.go: list rules, note cleaning, Today invariant (TestApplyCLIToday*, TestCompletedTodayStaysInTodayAfterCLIToday), visible filter, Things order, sync pipeline (TestSyncModelUsesThingsCLI), logbook rule, create validation, read-only mode, rejected login, DATA_DIR.
+   edits_test.go: update, checklist, trash/restore, reopen/log completed, schedule/deadline/tags, Logbook/Trash, redaction, failed-request logs.
+   writes_test.go: retries, one write at a time, move rules.
+   reorder_test.go: planReorder, reorder endpoint, projects/areas.
+   modelcache_test.go: model cache, gzip.
+   security_test.go: config check, client IP, Basic Auth lockout, same-origin guard, HTTPS redirect, headers, input checks, server-managed login.
+   passkey_test.go: passkey config, sessions, registration, login, rate limits, removal, setup codes, origins.
+
+B. Playwright (tests/app.spec.js, playwright.config.js) — npm run test:e2e
+   Starts go run ./cmd/nubererum on 127.0.0.1:4180 with credentials cleared; the API is mocked in the browser. Covers sync display, completing and logging, quick add, projects, sidebar, drag and drop, headings, editor, trash/restore, shortcuts (including the Move dialog, navigation popover, paste and the cheat sheet), Logbook/Trash, error reports, touch long press, Settings disconnect.
+   tests/passkey.spec.js: passkey flow with a virtual authenticator against a running passkey-mode container; skipped without PASSKEY_CONTAINER (PASSKEY_BASE_URL default http://localhost:3007).
+
+C. Parity — tests/parity.test.js (npm run test:parity) with fixtures tests/fixtures/parity/*.json; live comparison per docs/PARITY_TESTING.md (Mac export via scripts/export-things-reference.applescript; Basic Auth via PARITY_APP_USERNAME / PARITY_APP_PASSWORD in a header). Prints shortened UUIDs only.
+
+Not covered: writes against the real account (stand-ins and the SDK write check only), the CLI itself, the container build and runtime.
+
+================================================================================
+8. SECURITY
+================================================================================
+Trust boundary: browser (owner) -> TLS proxy -> Go server (account in memory) -> things-cli -> Things Cloud. Sensitive: Things email and password, the CLI cache, passkeys.json, the ability to change the account.
+
+Controls:
+- Start check: basic mode off loopback needs APP_PASSWORD >= 16 chars; passkey mode needs valid origins.
+- Basic Auth: constant-time compare; 5 failures in 15 min block a client for 15 min (429); after 50 failures overall in 15 min, one failure blocks. Client IP = rightmost X-Forwarded-For entry.
+- Passkeys: one relying party per origin; discoverable credentials, user verification required; session cookie __Host-things_session (Secure, HttpOnly, SameSite=Strict), hashed in memory, 30 days; first passkey per origin needs a one-time setup code (30 min, stored hashed); failures share the lockout; passkey-remove ends that passkey's sessions.
+- httpsOnly: X-Forwarded-Proto http -> 308 to https. HSTS when the proxy reports https.
+- Headers: CSP default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; nosniff; no-referrer; X-Frame-Options DENY; Permissions-Policy; COOP/CORP same-origin; X-Robots-Tag noindex.
+- sameOriginGuard: POST only, same origin or APP_PUBLIC_ORIGINS, JSON only, 64 KiB.
+- CLI: exec.Command argv; account via child env; ID validation; no values starting with "--".
+- Logs: key=value on stderr; failed /api and /auth requests, sync and write failures, panics, client errors; the account is replaced by <account>.
+- Server timeouts: header 10 s, read 30 s, write 10 min, idle 2 min.
+- Container: read-only, no capabilities, no-new-privileges, process/memory/log limits, non-root.
+- staticHandler: containment check; index.html fallback.
+
+Known limitations:
+- No official API; the account password is on the server; one account, no per-user model.
+- No TLS in the app; Basic Auth has no second factor.
+- GET /api/sync shows the full CLI path in `source` (/api/status shows the base name only).
+- backend.directCloud/nativeFallback in /api/status are constants; there is no reader without things-cli.
+
+Do not commit: .env, things-cli-state*.json, passkeys.json, passkey-setup.json, bin/, nubererum.
+
+
+================================================================================
+9. LIMITATIONS & OPEN QUESTIONS
+================================================================================
+- Repeating to-dos cannot be created and their rule cannot be changed (instances can be edited, completed and moved; templates only take title, notes and Trash); no reminders; no Markdown in notes; the Trash cannot be emptied.
+- Logbook and Trash show at most 300 recent entries by default.
+- POST /api/create takes no when=upcoming; use a future `scheduled` date.
+- Writes are verified only against stand-ins and the SDK write check, plus some live use by the owner; the CLI has no dry run.
+- Lists can be up to 30 s old when first shown (cached model, then refresh).
+- TZ must match the Things devices, or Today and Upcoming differ.
+- Passkey sessions are lost on restart.
+- scripts/start-nubererum.sh defaults to HOST=0.0.0.0; without a strong APP_PASSWORD the server refuses to start.
+Open questions:
+- Will Cultured Code publish an API or app passwords?
+- How stable is the things-cli output and state format across SDK releases?
+- Should /api/sync's `source` be reduced to a base file name?
+
+================================================================================
+10. END
+================================================================================
+This file does not repeat runbooks that live in the operator pages; for deployment, passkeys, the CLI patch, security and parity, follow docs/DEPLOYMENT.md, docs/SECURITY.md, and docs/PARITY_TESTING.md.

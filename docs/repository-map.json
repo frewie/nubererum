@@ -1,0 +1,761 @@
+{
+  "schema_version": 1,
+  "revision": "bb3357bdc159e699f83f1ceb80c6245969d3b0ba",
+  "project": "nubererum",
+  "summary": "A self-hosted Go web app to view and edit Things 3 tasks in Things Cloud. It runs the reverse-engineered things-cli (arthursoares/things-cloud-sdk v0.6.0 plus a local patch) as a child process, builds its model from the CLI state cache, keeps the model in memory, and serves a dependency-free static frontend. Built for one owner; Basic Auth for LAN use, WebAuthn passkeys for internet access behind a TLS proxy.",
+  "languages": [
+    "go",
+    "javascript"
+  ],
+  "entry_points": [
+    {
+      "path": "cmd/nubererum/main.go",
+      "kind": "executable",
+      "symbol": "main",
+      "description": "Server entry point: logging, passkey subcommands (passkey-setup, passkey-list, passkey-remove), HOST:PORT (default 127.0.0.1:4173), validateSecurityConfig, routes, warm-up sync, appHandler middleware chain."
+    },
+    {
+      "path": "public/index.html",
+      "kind": "frontend",
+      "description": "Single-page UI: lists, sidebar with areas and projects, search, quick add, editor, Connect Things Cloud panel.",
+      "evidence": [
+        "public/index.html",
+        "public/app.js",
+        "public/styles.css"
+      ]
+    },
+    {
+      "path": "public/login.html",
+      "kind": "frontend",
+      "description": "Passkey sign-in and account page (APP_AUTH=passkey).",
+      "evidence": [
+        "public/login.html",
+        "public/login.js"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "name": "http-server",
+      "path": "cmd/nubererum/main.go",
+      "role": "Route mux, apiHandler (status, login, logout, sync, complete, create), staticHandler, in-memory Things account.",
+      "evidence": [
+        "cmd/nubererum/main.go#main",
+        "cmd/nubererum/main.go#apiHandler",
+        "cmd/nubererum/main.go#staticHandler"
+      ]
+    },
+    {
+      "name": "cli-adapter",
+      "path": "cmd/nubererum/main.go",
+      "role": "Finds things-cli and runs it with exec.Command (argv, no shell); the account goes through child environment variables; batch operations as JSON on stdin.",
+      "evidence": [
+        "cmd/nubererum/main.go#cliPath",
+        "cmd/nubererum/main.go#runCLIOutputWithCredentials",
+        "cmd/nubererum/main.go#cliEnv",
+        "cmd/nubererum/reorder.go#runCLIBatch"
+      ]
+    },
+    {
+      "name": "sync-model",
+      "path": "cmd/nubererum/main.go",
+      "role": "Runs things-cli list and things-cli today, reads the cache, applies Things' list rules, the visible filter, the logbook rule and Today from the CLI, and sorts like Things.",
+      "evidence": [
+        "cmd/nubererum/main.go#syncModel",
+        "cmd/nubererum/main.go#syncModelFromCache",
+        "cmd/nubererum/main.go#stateViews",
+        "cmd/nubererum/main.go#logbookRule",
+        "cmd/nubererum/main.go#applyVisibleTaskFilter",
+        "cmd/nubererum/main.go#applyCLIToday",
+        "cmd/nubererum/main.go#sortTasks"
+      ]
+    },
+    {
+      "name": "model-cache",
+      "path": "cmd/nubererum/modelcache.go",
+      "role": "Keeps the last model in memory; background refresh after 30 s; ?fresh=1 waits for a sync after the last write; one sync at a time; copy-on-write patches after writes.",
+      "evidence": [
+        "cmd/nubererum/modelcache.go#modelCache"
+      ]
+    },
+    {
+      "name": "writes",
+      "path": "cmd/nubererum/",
+      "role": "Write endpoints through things-cli batch, edit, complete, create-tag, create-area; one write at a time (writeMu); retries only when nothing was written; APP_READ_ONLY via writePaths.",
+      "evidence": [
+        "cmd/nubererum/writes.go#withWriteRetry",
+        "cmd/nubererum/writes.go#handleMove",
+        "cmd/nubererum/edits.go#writePaths",
+        "cmd/nubererum/edits.go#handleUpdate",
+        "cmd/nubererum/edits.go#handleChecklist",
+        "cmd/nubererum/details.go#handleSchedule",
+        "cmd/nubererum/reorder.go#planReorder"
+      ]
+    },
+    {
+      "name": "archive",
+      "path": "cmd/nubererum/archive.go",
+      "role": "GET /api/logbook and /api/trash from the cache file; 300 entries by default.",
+      "evidence": [
+        "cmd/nubererum/archive.go#handleArchive"
+      ]
+    },
+    {
+      "name": "security-middleware",
+      "path": "cmd/nubererum/security.go",
+      "role": "validateSecurityConfig, Basic Auth with lockout, httpsOnly, securityHeaders (CSP, HSTS behind HTTPS proxies), sameOriginGuard (POST, same origin, JSON, 64 KiB), ID and option-injection checks, server timeouts, appHandler.",
+      "evidence": [
+        "cmd/nubererum/security.go#validateSecurityConfig",
+        "cmd/nubererum/security.go#basicAuthWithLimiter",
+        "cmd/nubererum/security.go#httpsOnly",
+        "cmd/nubererum/security.go#securityHeaders",
+        "cmd/nubererum/security.go#sameOriginGuard",
+        "cmd/nubererum/security.go#appHandler"
+      ]
+    },
+    {
+      "name": "passkeys",
+      "path": "cmd/nubererum/passkey.go",
+      "role": "WebAuthn relying party per origin, /auth/* endpoints, /login, __Host-things_session cookie, setup codes, passkey CLI subcommands.",
+      "evidence": [
+        "cmd/nubererum/passkey.go#newPasskeyServer",
+        "cmd/nubererum/passkey.go#middleware",
+        "cmd/nubererum/passkey.go#runPasskeyCommand"
+      ]
+    },
+    {
+      "name": "logging-and-compression",
+      "path": "cmd/nubererum/",
+      "role": "key=value logs on stderr with the account redacted, failed-request logging, /api/client-error; gzip for text and JSON.",
+      "evidence": [
+        "cmd/nubererum/logging.go#logErrors",
+        "cmd/nubererum/logging.go#redact",
+        "cmd/nubererum/logging.go#handleClientError",
+        "cmd/nubererum/compress.go#gzipResponses"
+      ]
+    },
+    {
+      "name": "frontend",
+      "path": "public/",
+      "role": "Vanilla JS, no build step. Things-like lists, sidebar, editor, selection, keyboard shortcuts after Things for Mac with a cheat sheet (public/shortcuts.js), drag and drop, touch long press, optimistic updates; remembers only the last list in localStorage.",
+      "evidence": [
+        "public/app.js",
+        "public/shortcuts.js",
+        "public/index.html",
+        "public/styles.css",
+        "public/manifest.webmanifest"
+      ]
+    }
+  ],
+  "interfaces": {
+    "base_url": "http://127.0.0.1:4173 (default)",
+    "auth": "APP_AUTH=basic (default): Basic Auth when APP_PASSWORD is set, required off loopback. APP_AUTH=passkey: WebAuthn session cookie required for everything except /login, /auth/* and login assets.",
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/api/status",
+        "write": false,
+        "description": "signedIn, email, serverManaged, auth, backend {mode, cli, nativeFallback, directCloud}.",
+        "evidence": [
+          "cmd/nubererum/main.go#apiHandler",
+          "cmd/nubererum/main.go#backendInfo"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/login",
+        "write": false,
+        "description": "Check the account with things-cli today, then keep it in memory. 403 when the account comes from the environment.",
+        "evidence": [
+          "cmd/nubererum/main.go#apiHandler",
+          "cmd/nubererum/main_test.go#TestRejectedLoginDoesNotCreateSession"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/logout",
+        "write": false,
+        "description": "Clear the account and the cached model. 403 when the account comes from the environment.",
+        "evidence": [
+          "cmd/nubererum/main.go#apiHandler"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/api/sync",
+        "write": false,
+        "description": "Cached model (tasks, projects, areas, headings, tags, lists, stats, source, syncedAt, refreshing, syncError); ?fresh=1 waits for a new sync.",
+        "evidence": [
+          "cmd/nubererum/main.go#apiHandler",
+          "cmd/nubererum/modelcache.go#cached",
+          "cmd/nubererum/modelcache.go#fresh"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/api/logbook",
+        "write": false,
+        "description": "Logged to-dos and projects from the cache, newest first; ?limit (default 300, max 2000).",
+        "evidence": [
+          "cmd/nubererum/archive.go#handleArchive"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/api/trash",
+        "write": false,
+        "description": "Trashed to-dos and projects from the cache; ?limit (default 300, max 2000).",
+        "evidence": [
+          "cmd/nubererum/archive.go#handleArchive"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/create",
+        "write": true,
+        "description": "Create a task, project or heading (type, title<=500, note<=5000, when inbox|today|anytime|someday, scheduled, project, heading, area); new to-dos are moved to the top with a reorder write.",
+        "evidence": [
+          "cmd/nubererum/main.go#apiHandler",
+          "cmd/nubererum/main.go#validWhen",
+          "cmd/nubererum/main_test.go#TestCreatePassesTypeAndStartDate"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/complete",
+        "write": true,
+        "description": "things-cli complete <uuid>; the to-do stays listed until logged.",
+        "evidence": [
+          "cmd/nubererum/main.go#apiHandler"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/reopen",
+        "write": true,
+        "description": "Reopen a completed to-do.",
+        "evidence": [
+          "cmd/nubererum/edits.go#handleReopen"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/log-completed",
+        "write": true,
+        "description": "Move completed to-dos to the Logbook.",
+        "evidence": [
+          "cmd/nubererum/edits.go#handleLogCompleted"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/update",
+        "write": true,
+        "description": "Edit title and/or notes via things-cli edit.",
+        "evidence": [
+          "cmd/nubererum/edits.go#handleUpdate"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/checklist",
+        "write": true,
+        "description": "Checklist add, edit, complete, delete, reorder.",
+        "evidence": [
+          "cmd/nubererum/edits.go#handleChecklist"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/trash",
+        "write": true,
+        "description": "Move 1-100 to-dos to the Trash.",
+        "evidence": [
+          "cmd/nubererum/edits.go#handleTrash"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/restore",
+        "write": true,
+        "description": "Restore 1-100 to-dos from the Trash.",
+        "evidence": [
+          "cmd/nubererum/edits.go#handleTrash"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/schedule",
+        "write": true,
+        "description": "Set when (today|anytime|someday|inbox) or a start date for 1-100 to-dos.",
+        "evidence": [
+          "cmd/nubererum/details.go#handleSchedule"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/deadline",
+        "write": true,
+        "description": "Set or remove a deadline.",
+        "evidence": [
+          "cmd/nubererum/details.go#handleDeadline"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/tags",
+        "write": true,
+        "description": "Replace the tags of a to-do, project or area.",
+        "evidence": [
+          "cmd/nubererum/details.go#handleTags"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/tag-create",
+        "write": true,
+        "description": "things-cli create-tag <title>.",
+        "evidence": [
+          "cmd/nubererum/details.go#handleCreateNamed"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/area-create",
+        "write": true,
+        "description": "things-cli create-area <title>.",
+        "evidence": [
+          "cmd/nubererum/details.go#handleCreateNamed"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/project-area",
+        "write": true,
+        "description": "Move a project into an area or out of any area.",
+        "evidence": [
+          "cmd/nubererum/details.go#handleProjectArea"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/move",
+        "write": true,
+        "description": "Move 1-100 to-dos to a project, area, heading or today|anytime|someday.",
+        "evidence": [
+          "cmd/nubererum/writes.go#handleMove"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/reorder",
+        "write": true,
+        "description": "Reorder to-dos (view today or a list), projects or areas in one batch.",
+        "evidence": [
+          "cmd/nubererum/reorder.go#handleReorder"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/api/client-error",
+        "write": false,
+        "description": "Browser error reports to the server log; 204; at most 60 per minute logged.",
+        "evidence": [
+          "cmd/nubererum/logging.go#handleClientError"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/auth/status",
+        "write": false,
+        "description": "Passkey mode: authenticated, registered, passkey name.",
+        "evidence": [
+          "cmd/nubererum/passkey.go#handleStatus"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/auth/login/begin, /auth/login/finish",
+        "write": false,
+        "description": "Passkey mode: discoverable WebAuthn sign-in; sets __Host-things_session.",
+        "evidence": [
+          "cmd/nubererum/passkey.go#handleLoginBegin",
+          "cmd/nubererum/passkey.go#handleLoginFinish"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/auth/register/begin, /auth/register/finish",
+        "write": false,
+        "description": "Passkey mode: register a passkey with a session or a one-time setup code.",
+        "evidence": [
+          "cmd/nubererum/passkey.go#handleRegisterBegin",
+          "cmd/nubererum/passkey.go#handleRegisterFinish"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/auth/logout",
+        "write": false,
+        "description": "Passkey mode: end the session.",
+        "evidence": [
+          "cmd/nubererum/passkey.go#handleLogout"
+        ]
+      }
+    ],
+    "errors": {
+      "envelope": "{\"error\": \"<message>\"}",
+      "codes": {
+        "400": "Invalid body or field.",
+        "401": "No Things account signed in, no passkey session, or Basic Auth missing.",
+        "403": "Read-only instance, server-managed login/logout, same-origin guard, static traversal, unknown passkey origin, wrong setup code.",
+        "404": "Unknown API route.",
+        "405": "Method other than GET, HEAD or POST.",
+        "409": "The cached model no longer has a referenced item; refresh.",
+        "415": "Write without Content-Type application/json.",
+        "424": "things-cli not found.",
+        "429": "Too many failed sign-in attempts.",
+        "500": "Unexpected error or recovered panic.",
+        "502": "things-cli failed or printed non-JSON output."
+      },
+      "source": "cmd/nubererum/main.go#statusError, errorResponse; security.go; passkey.go"
+    }
+  },
+  "configuration": [
+    {
+      "name": "PORT",
+      "default": "4173",
+      "where": "cmd/nubererum/main.go#main",
+      "description": "Listen port."
+    },
+    {
+      "name": "HOST",
+      "default": "127.0.0.1",
+      "where": "cmd/nubererum/main.go#main",
+      "description": "Listen address. Docker sets 0.0.0.0 inside the container."
+    },
+    {
+      "name": "APP_AUTH",
+      "default": "basic",
+      "where": "cmd/nubererum/passkey.go#authMode",
+      "description": "basic or passkey."
+    },
+    {
+      "name": "APP_USERNAME",
+      "default": "admin",
+      "where": "cmd/nubererum/security.go#basicAuthWithLimiter",
+      "description": "Basic Auth user; WebAuthn user name in passkey mode."
+    },
+    {
+      "name": "APP_PASSWORD",
+      "default": "",
+      "where": "cmd/nubererum/security.go#validateSecurityConfig",
+      "description": "Enables Basic Auth; required (>= 16 characters) off loopback in basic mode; ignored in passkey mode. Do not commit real values."
+    },
+    {
+      "name": "APP_PUBLIC_ORIGINS",
+      "default": "",
+      "where": "cmd/nubererum/security.go#allowedOrigins",
+      "description": "Extra origins for the same-origin guard; passkey origins when APP_PASSKEY_ORIGINS is unset."
+    },
+    {
+      "name": "APP_PASSKEY_ORIGINS",
+      "default": "",
+      "where": "cmd/nubererum/passkey.go#passkeyOrigins",
+      "description": "Passkey origins (also APP_PASSKEY_ORIGIN); https, or http://localhost."
+    },
+    {
+      "name": "APP_READ_ONLY",
+      "default": "",
+      "where": "cmd/nubererum/main.go#readOnly",
+      "description": "1, true or yes rejects all write endpoints with 403."
+    },
+    {
+      "name": "THINGS_USERNAME",
+      "default": "",
+      "where": "cmd/nubererum/main.go#session",
+      "description": "Things Cloud email. Fallback THINGS_EMAIL."
+    },
+    {
+      "name": "THINGS_PASSWORD",
+      "default": "",
+      "where": "cmd/nubererum/main.go#session",
+      "description": "Things Cloud password. Fallbacks THINGS_TOKEN, THINGS_CLOUD_PASSWORD. Do not commit real values."
+    },
+    {
+      "name": "DATA_DIR",
+      "default": "app root",
+      "where": "cmd/nubererum/main.go#cachePath",
+      "description": "Directory for the CLI cache, passkeys.json and passkey-setup.json."
+    },
+    {
+      "name": "THINGS_CLI_CACHE",
+      "default": "<DATA_DIR>/things-cli-state-v8.json",
+      "where": "cmd/nubererum/main.go#cachePath",
+      "description": "Path of the CLI state cache. Sensitive."
+    },
+    {
+      "name": "THINGS_CLOUD_CLI",
+      "default": "",
+      "where": "cmd/nubererum/main.go#cliPath",
+      "description": "Explicit path of the things-cli binary."
+    },
+    {
+      "name": "TZ",
+      "default": "system (Compose: Europe/Berlin)",
+      "where": "compose.yaml",
+      "description": "Decides which day is today for the app and things-cli."
+    }
+  ],
+  "dependencies": {
+    "runtime": [
+      {
+        "name": "things-cli",
+        "version": "v0.6.0 + patches/things-cloud-sdk-arthursoares.patch",
+        "source": "github.com/arthursoares/things-cloud-sdk",
+        "commit_pinned_in": "Dockerfile (THINGS_SDK_COMMIT)",
+        "installed_by": [
+          "Dockerfile",
+          "scripts/build-things-cli.sh"
+        ]
+      }
+    ],
+    "go_modules": [
+      {
+        "name": "github.com/go-webauthn/webauthn",
+        "version": "v0.18.2"
+      }
+    ],
+    "node_devDependencies": [
+      {
+        "name": "@playwright/test",
+        "version": "1.61.0"
+      }
+    ],
+    "notes": "One direct Go dependency (passkeys). Node tooling is test-only."
+  },
+  "persistence": [
+    {
+      "what": "Things CLI state cache",
+      "path_var": "THINGS_CLI_CACHE",
+      "default_path": "DATA_DIR/things-cli-state-v8.json (Docker: /data/things-cli-state-v8.json)",
+      "written_by": "things-cli",
+      "read_by": "NubeRerum (sync, Logbook, Trash)",
+      "sensitivity": "high (task metadata of the whole account)",
+      "evidence": [
+        "cmd/nubererum/main.go#cachePath",
+        "compose.yaml",
+        ".gitignore"
+      ]
+    },
+    {
+      "what": "Passkeys and setup code",
+      "default_path": "DATA_DIR/passkeys.json (0600), DATA_DIR/passkey-setup.json (hashed code)",
+      "written_by": "NubeRerum (passkey mode)",
+      "sensitivity": "high",
+      "evidence": [
+        "cmd/nubererum/passkey.go#passkeyStore",
+        "cmd/nubererum/passkey.go#createSetupCode"
+      ]
+    },
+    {
+      "what": "Things Cloud credentials",
+      "stored_in": "process memory (from env or browser sign-in)",
+      "evidence": [
+        "cmd/nubererum/main.go#session",
+        "cmd/nubererum/main.go#cliEnv"
+      ]
+    },
+    {
+      "what": "Model cache and passkey sessions",
+      "stored_in": "process memory; lost on restart",
+      "evidence": [
+        "cmd/nubererum/modelcache.go",
+        "cmd/nubererum/passkey.go#startSession"
+      ]
+    },
+    {
+      "what": "Browser state",
+      "stored_in": "localStorage key things-view (last opened list); passkey session cookie __Host-things_session; no credentials",
+      "evidence": [
+        "public/app.js",
+        "cmd/nubererum/passkey.go"
+      ]
+    }
+  ],
+  "security": {
+    "trust_boundary": "Browser (owner) -> TLS proxy -> Go server (account in memory) -> things-cli -> Things Cloud.",
+    "controls": [
+      "Refuses to start off loopback in basic mode without APP_PASSWORD >= 16 characters",
+      "Basic Auth with constant-time compare and per-client plus global lockout",
+      "Passkey mode: WebAuthn per origin, user verification, __Host- session cookie, one-time setup codes",
+      "HTTPS redirect via X-Forwarded-Proto; HSTS behind HTTPS proxies",
+      "Security headers including a strict CSP",
+      "Same-origin guard: POST only, same origin or APP_PUBLIC_ORIGINS, JSON only, 64 KiB bodies",
+      "exec.Command(argv); the account goes to the CLI through child environment variables",
+      "ID validation and rejection of values starting with --",
+      "APP_READ_ONLY for test instances",
+      "Account redaction in logs",
+      "Server timeouts; hardened container (read-only, no capabilities, limits)",
+      "filepath.Rel containment in the static handler"
+    ],
+    "known_limitations": [
+      "No official API; the account password is on the server",
+      "One account, no per-user authorization",
+      "No TLS in the app; Basic Auth has no second factor",
+      "GET /api/sync exposes the full CLI path in source",
+      "backend.directCloud and nativeFallback in /api/status are constants; there is no reader without things-cli"
+    ],
+    "evidence": [
+      "cmd/nubererum/security.go",
+      "cmd/nubererum/passkey.go",
+      "cmd/nubererum/security_test.go",
+      "cmd/nubererum/passkey_test.go",
+      "docs/SECURITY.md"
+    ]
+  },
+  "commands": [
+    {
+      "name": "build",
+      "cmd": "go build -o nubererum ./cmd/nubererum"
+    },
+    {
+      "name": "build-cli-unix",
+      "cmd": "scripts/build-things-cli.sh"
+    },
+    {
+      "name": "run-local-linux",
+      "cmd": "./scripts/start-nubererum.sh"
+    },
+    {
+      "name": "docker-up",
+      "cmd": "docker compose up -d --build"
+    },
+    {
+      "name": "docker-down",
+      "cmd": "docker compose down"
+    },
+    {
+      "name": "passkey-setup",
+      "cmd": "docker exec nubererum nubererum passkey-setup"
+    },
+    {
+      "name": "go-test",
+      "cmd": "go test ./..."
+    },
+    {
+      "name": "go-vet",
+      "cmd": "go vet ./..."
+    },
+    {
+      "name": "go-checks-in-container",
+      "cmd": "docker run --rm -v \"$PWD\":/src -w /src golang:1.26-alpine sh -c 'gofmt -l . ; go vet ./... && go test -count=1 ./...'"
+    },
+    {
+      "name": "playwright-install",
+      "cmd": "npm install && npx playwright install chromium"
+    },
+    {
+      "name": "e2e-test",
+      "cmd": "npm run test:e2e"
+    },
+    {
+      "name": "passkey-e2e-test",
+      "cmd": "PASSKEY_CONTAINER=<name> npx playwright test tests/passkey.spec.js"
+    },
+    {
+      "name": "parity-unit-test",
+      "cmd": "npm run test:parity"
+    },
+    {
+      "name": "parity-compare",
+      "cmd": "npm run compare:parity -- --reference .things-parity/reference.json"
+    }
+  ],
+  "tests": [
+    {
+      "name": "go",
+      "path": "cmd/nubererum/*_test.go",
+      "files": [
+        "cmd/nubererum/main_test.go",
+        "cmd/nubererum/edits_test.go",
+        "cmd/nubererum/writes_test.go",
+        "cmd/nubererum/reorder_test.go",
+        "cmd/nubererum/modelcache_test.go",
+        "cmd/nubererum/security_test.go",
+        "cmd/nubererum/passkey_test.go"
+      ],
+      "run": "go test ./..."
+    },
+    {
+      "name": "playwright-e2e",
+      "path": "tests/app.spec.js",
+      "run": "npm run test:e2e",
+      "config": "playwright.config.js",
+      "notes": "API mocked in the browser; server on 127.0.0.1:4180 with credentials cleared."
+    },
+    {
+      "name": "playwright-passkey",
+      "path": "tests/passkey.spec.js",
+      "run": "PASSKEY_CONTAINER=<name> npx playwright test tests/passkey.spec.js",
+      "notes": "Skipped without PASSKEY_CONTAINER; needs a running passkey-mode container."
+    },
+    {
+      "name": "parity-unit",
+      "path": "tests/parity.test.js",
+      "run": "npm run test:parity",
+      "fixtures": [
+        "tests/fixtures/parity/reference.json",
+        "tests/fixtures/parity/matching-app.json",
+        "tests/fixtures/parity/mismatched-app.json"
+      ]
+    },
+    {
+      "name": "parity-live",
+      "run": "npm run compare:parity",
+      "workflow": "docs/PARITY_TESTING.md"
+    }
+  ],
+  "documentation": {
+    "site": {
+      "generator": "mkdocs-material",
+      "config": "mkdocs.yml",
+      "homepage": "docs/index.md",
+      "pages": [
+        "docs/index.md",
+        "docs/setup.md",
+        "docs/api.md",
+        "docs/architecture.md",
+        "docs/testing.md",
+        "docs/limitations.md",
+        "docs/DEPLOYMENT.md",
+        "docs/SECURITY.md",
+        "docs/PARITY_TESTING.md"
+      ],
+      "not_in_nav": []
+    },
+    "operator_docs": [
+      "README.md",
+      "docs/DEPLOYMENT.md",
+      "docs/SECURITY.md",
+      "docs/PARITY_TESTING.md"
+    ],
+    "dated_snapshots": [],
+    "generated_summaries": [
+      "llms.txt",
+      "llms-full.txt",
+      "docs/repository-map.json",
+      "AGENTS.md (managed block)",
+      "docs/index.md",
+      "docs/setup.md",
+      "docs/api.md",
+      "docs/architecture.md",
+      "docs/testing.md",
+      "docs/limitations.md"
+    ],
+    "authority_hierarchy": [
+      "cmd/nubererum/*.go + tests, public/*, deployment files, scripts, patch (source of truth for behavior)",
+      "docs/index|setup|api|architecture|testing|limitations.md + llms.txt + llms-full.txt + repository-map.json + AGENTS.md managed block (generated summaries)"
+    ]
+  }
+}

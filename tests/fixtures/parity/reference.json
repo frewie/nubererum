@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "source": "things3-applescript",
+  "lists": {
+    "today": [
+      { "uuid": "today-first", "status": "open", "position": 0, "project": "project-1", "area": "area-1" },
+      { "uuid": "today-second", "status": "open", "position": 1, "project": "", "area": "" }
+    ],
+    "inbox": [{ "uuid": "inbox-task", "status": "open", "position": 0, "project": "", "area": "" }],
+    "anytime": [
+      { "uuid": "anytime-first", "status": "open", "position": 0, "project": "", "area": "" },
+      { "uuid": "anytime-second", "status": "open", "position": 1, "project": "", "area": "" }
+    ],
+    "upcoming": [],
+    "someday": [],
+    "logbook": [{ "uuid": "completed-task", "status": "completed", "position": 0, "project": "", "area": "" }]
+  }
+}

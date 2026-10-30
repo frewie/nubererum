@@ -1,0 +1,41 @@
+site_name: NubeRerum
+site_description: Self-hosted web app for Things 3 tasks in Things Cloud.
+docs_dir: docs
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue
+      accent: blue
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.code.annotate
+plugins:
+  - search:
+      separator: '[\s\u00BC\-_()/"'']+'
+      indexing: word
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+nav:
+  - Overview: index.md
+  - Setup & Commands: setup.md
+  - API Reference: api.md
+  - Architecture: architecture.md
+  - Testing: testing.md
+  - Limitations: limitations.md
+  - Deployment: DEPLOYMENT.md
+  - Security: SECURITY.md
+  - Parity Testing: PARITY_TESTING.md

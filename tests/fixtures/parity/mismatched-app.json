@@ -1,0 +1,19 @@
+{
+  "generatedAt": "2026-08-17T12:00:00Z",
+  "tasks": [],
+  "projects": [],
+  "areas": [],
+  "lists": {
+    "today": [],
+    "inbox": [
+      { "uuid": "inbox-task", "status": "open" },
+      { "uuid": "completed-task", "status": "open" }
+    ],
+    "anytime": [
+      { "uuid": "anytime-second", "status": "open" },
+      { "uuid": "anytime-first", "status": "open" }
+    ],
+    "upcoming": [],
+    "someday": []
+  }
+}
