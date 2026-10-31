@@ -1,0 +1,32 @@
+# Local Things data and credentials
+.env
+.env.*
+!.env.example
+.things-cli-state*.json
+things-cli-state*.json
+data/
+.things-parity/
+passkeys.json
+passkey-setup.json
+mcp-tokens.json
+
+# Local build outputs and vendored helper binaries
+/nubererum
+bin/
+
+# Node/Go build artifacts
+node_modules/
+coverage/
+dist/
+tmp/
+playwright-report/
+test-results/
+.playwright-mcp/
+*.log
+*~
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

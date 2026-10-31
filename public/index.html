@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1f6fe0" />
+    <title>NubeRerum</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <img class="brand-mark" src="/icon.svg" alt="" />
+          <span>NubeRerum</span>
+        </div>
+
+        <nav class="nav" aria-label="Things lists">
+          <button class="nav-item" data-view="inbox">
+            <span class="nav-icon" data-icon="inbox"></span>
+            <span>Inbox</span>
+            <strong id="count-inbox">0</strong>
+          </button>
+          <button class="nav-item active" data-view="today">
+            <span class="nav-icon" data-icon="today"></span>
+            <span>Today</span>
+            <strong id="count-today">0</strong>
+          </button>
+          <button class="nav-item" data-view="upcoming">
+            <span class="nav-icon" data-icon="upcoming"></span>
+            <span>Upcoming</span>
+            <strong id="count-upcoming">0</strong>
+          </button>
+          <button class="nav-item" data-view="anytime">
+            <span class="nav-icon" data-icon="anytime"></span>
+            <span>Anytime</span>
+            <strong id="count-anytime">0</strong>
+          </button>
+          <button class="nav-item" data-view="someday">
+            <span class="nav-icon" data-icon="someday"></span>
+            <span>Someday</span>
+            <strong id="count-someday">0</strong>
+          </button>
+          <button class="nav-item nav-archive" data-view="logbook">
+            <span class="nav-icon" data-icon="logbook"></span>
+            <span>Logbook</span>
+            <strong></strong>
+          </button>
+          <button class="nav-item" data-view="trash">
+            <span class="nav-icon" data-icon="trash"></span>
+            <span>Trash</span>
+            <strong></strong>
+          </button>
+        </nav>
+
+        <nav class="sidebar-section" aria-label="Projects and areas">
+          <div id="projects" class="mini-list"></div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <button class="new-list" id="new-project-button" type="button" hidden>
+            <span class="nav-icon" data-icon="plus"></span>
+            <span>New Project</span>
+          </button>
+          <button class="new-list" id="new-area-button" type="button" hidden>
+            <span class="nav-icon" data-icon="plus"></span>
+            <span>New Area</span>
+          </button>
+          <button class="settings-link" id="tags-button" type="button" hidden>
+            <span class="nav-icon" data-icon="tag"></span>
+            <span>Tags</span>
+          </button>
+          <button class="settings-link" id="shortcuts-button" type="button" title="Keyboard shortcuts (?)">
+            <span class="nav-icon" data-icon="keyboard"></span>
+            <span>Shortcuts</span>
+          </button>
+          <button class="settings-link" id="settings-button" type="button">
+            <span class="nav-icon" data-icon="settings"></span>
+            <span>Settings</span>
+          </button>
+          <a class="settings-link" id="account-link" href="/login?account" hidden>
+            <span class="nav-icon" data-icon="key"></span>
+            <span>Passkeys</span>
+          </a>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div class="search">
+            <span data-icon="search"></span>
+            <input id="search" type="search" placeholder="Search" title="Search (/)" autocomplete="off" />
+          </div>
+          <button class="icon-button" id="refresh" type="button" title="Refresh (R)">
+            <span class="refresh-icon" data-icon="refresh"></span>
+            <span>Refresh</span>
+          </button>
+          <div class="status" id="status">
+            <span class="status-dot"></span>
+            <span id="status-text">Loading…</span>
+          </div>
+        </header>
+
+        <section class="list-header">
+          <div class="view-heading">
+            <span id="view-icon" data-icon="today"></span>
+            <h1 id="view-title">Today</h1>
+          </div>
+          <div class="list-actions">
+            <button class="icon-button" id="new-heading" type="button" title="Add a heading to this project" hidden>New Heading</button>
+            <button class="icon-button" id="complete-project" type="button" title="Complete this project (right-click a project for Cancel)" hidden>Complete Project</button>
+            <button class="icon-button" id="delete-project" type="button" title="Move this project and its to-dos to the Trash" hidden>Delete Project</button>
+            <button class="icon-button" id="log-completed" type="button" title="Move completed to-dos to the Logbook" hidden>Log Completed</button>
+            <div class="summary" id="summary">No sync yet</div>
+          </div>
+        </section>
+        <div id="project-details" class="editor-footer project-details" hidden></div>
+        <textarea id="project-note" class="project-note" rows="1" maxlength="5000" placeholder="Notes" aria-label="Project notes" hidden></textarea>
+
+        <form id="quick-add" class="quick-add" autocomplete="off" hidden>
+          <div class="quick-add-main">
+            <span data-icon="plus"></span>
+            <input name="title" type="text" placeholder="New To-Do" maxlength="500" title="New to-do (N)" />
+            <input name="scheduled" type="date" aria-label="Start date" hidden />
+            <button class="primary-button" type="submit">Add</button>
+          </div>
+          <textarea name="note" rows="2" maxlength="5000" placeholder="Notes"></textarea>
+        </form>
+
+        <section id="loading" class="skeleton" aria-hidden="true">
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+        </section>
+
+        <section id="empty-signin" class="signin">
+          <form id="login-form" class="signin-panel">
+            <h2>Connect Things Cloud</h2>
+            <p>
+              Credentials stay in this local server process and are not saved to browser storage.
+            </p>
+            <p id="backend-note" class="backend-note"></p>
+            <label>
+              <span>Email</span>
+              <input name="email" type="email" autocomplete="username" required />
+            </label>
+            <label>
+              <span>Password</span>
+              <input name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <button class="primary-button" type="submit">Connect</button>
+          </form>
+        </section>
+
+        <section class="task-list" id="tasks" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <dialog id="new-project" class="new-project">
+      <form method="dialog">
+        <h2>New Project</h2>
+        <label>
+          <span>Name</span>
+          <input name="title" type="text" maxlength="500" required />
+        </label>
+        <label>
+          <span>Area</span>
+          <select name="area"></select>
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" value="cancel" id="new-project-cancel">Cancel</button>
+          <button class="primary-button" type="submit" value="create">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="project-finish" class="new-project">
+      <form method="dialog">
+        <h2 id="project-finish-title">Complete Project</h2>
+        <p id="project-finish-text"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="submit" value="">Back</button>
+          <button class="secondary-button" type="submit" value="cancel">Cancel Them</button>
+          <button class="primary-button" type="submit" value="complete">Complete Them</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="repeat-dialog" class="new-project">
+      <form method="dialog">
+        <h2 id="repeat-title">Repeat</h2>
+        <label>
+          <span>Repeat</span>
+          <select name="type">
+            <option value="fixed">On a schedule</option>
+            <option value="after">After completion</option>
+          </select>
+        </label>
+        <label>
+          <span>Every</span>
+          <input name="every" type="number" min="1" max="99" value="1" required />
+        </label>
+        <label>
+          <span>Unit</span>
+          <select name="unit">
+            <option value="day">Days</option>
+            <option value="week" selected>Weeks</option>
+            <option value="month">Months</option>
+            <option value="year">Years</option>
+          </select>
+        </label>
+        <label id="repeat-month" hidden>
+          <span>Monthly on</span>
+          <select name="month">
+            <option value="day">The same day</option>
+            <option value="last">The last day</option>
+            <option value="weekday">The same weekday</option>
+          </select>
+        </label>
+        <label>
+          <span>First day</span>
+          <input name="start" type="date" required />
+        </label>
+        <p class="dialog-hint">The weekday or day of the month follows from the first day. The Things apps create the to-dos; this one moves to the Trash.</p>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" id="repeat-cancel">Cancel</button>
+          <button class="primary-button" type="submit" value="repeat">Repeat</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="tags-dialog" class="new-project">
+      <form method="dialog">
+        <h2>Tags</h2>
+        <p class="dialog-hint">Rename a tag by editing its name; deleting it removes it from every to-do and project.</p>
+        <ul id="tags-list" class="tags-list"></ul>
+        <div class="dialog-actions">
+          <button class="primary-button" type="submit" value="done">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+    <script src="/shortcuts.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

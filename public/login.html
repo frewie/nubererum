@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in · NubeRerum</title>
+    <meta name="theme-color" content="#1f6fe0" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="login-page">
+    <main class="login-shell">
+      <div class="brand">
+        <img class="brand-mark" src="/icon.svg" alt="" />
+        <span>NubeRerum</span>
+      </div>
+
+      <section id="signin" class="signin-panel" hidden>
+        <h1>Sign in</h1>
+        <p>Use the passkey you registered for this app.</p>
+        <button id="signin-button" class="primary-button" type="button">Sign in with passkey</button>
+      </section>
+
+      <section id="account" class="signin-panel" hidden>
+        <h1>Signed in</h1>
+        <p id="account-text">You are signed in with a passkey.</p>
+        <a class="primary-button" href="/">Open tasks</a>
+        <form id="add-form" class="login-form" autocomplete="off">
+          <label>
+            <span>Name for another passkey</span>
+            <input name="name" type="text" maxlength="64" placeholder="e.g. MacBook" />
+          </label>
+          <button class="secondary-button" type="submit">Add passkey</button>
+        </form>
+        <button id="logout-button" class="secondary-button" type="button">Sign out</button>
+      </section>
+
+      <details id="setup" class="signin-panel" hidden>
+        <summary>Register a passkey with a setup code</summary>
+        <p>
+          Create a code on the server with
+          <code>docker exec nubererum nubererum passkey-setup</code>.
+          It works once and expires after 30 minutes.
+        </p>
+        <form id="setup-form" class="login-form" autocomplete="off">
+          <label>
+            <span>Setup code</span>
+            <input name="setupCode" type="text" required autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" />
+          </label>
+          <label>
+            <span>Passkey name</span>
+            <input name="name" type="text" maxlength="64" placeholder="e.g. iPhone" />
+          </label>
+          <button class="primary-button" type="submit">Register passkey</button>
+        </form>
+      </details>
+
+      <p id="message" class="login-message" role="status" aria-live="polite"></p>
+    </main>
+    <script src="/login.js"></script>
+  </body>
+</html>

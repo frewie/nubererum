@@ -1,0 +1,19 @@
+{
+  "generatedAt": "2026-08-17T12:00:00Z",
+  "tasks": [],
+  "projects": [],
+  "areas": [],
+  "lists": {
+    "today": [
+      { "uuid": "today-first", "status": "open", "project": "project-1", "area": "area-1" },
+      { "uuid": "today-second", "status": "open", "project": "", "area": "" }
+    ],
+    "inbox": [{ "uuid": "inbox-task", "status": "open", "project": "", "area": "" }],
+    "anytime": [
+      { "uuid": "anytime-first", "status": "open", "project": "", "area": "" },
+      { "uuid": "anytime-second", "status": "open", "project": "", "area": "" }
+    ],
+    "upcoming": [],
+    "someday": []
+  }
+}

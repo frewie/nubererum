@@ -1,0 +1,57 @@
+# NubeRerum
+
+> A self-hosted Go web app to view and edit Things 3 tasks in Things Cloud. It runs the reverse-engineered `things-cli` (arthursoares/things-cloud-sdk v0.6.0 plus a local patch) and reads its state cache; the frontend is dependency-free static files. Built for one owner on a home server; internet access only with passkeys behind a TLS proxy.
+
+> Generated from input revision `bb3357bdc159e699f83f1ceb80c6245969d3b0ba`. The same marker appears in the `Revision:` line of [llms-full.txt](llms-full.txt) and the `AGENTS.md` managed block; the full source-of-truth map is below.
+
+## Quick facts
+
+- **Backend:** Go 1.26, module `nubererum`; one Go dependency, `github.com/go-webauthn/webauthn`.
+- **CLI:** `things-cli` from `arthursoares/things-cloud-sdk` v0.6.0, commit checked in the `Dockerfile`, plus `patches/things-cloud-sdk-arthursoares.patch`. Built by the image or `scripts/build-things-cli.sh`.
+- **Reads:** `things-cli list` + `things-cli today`, then the cache `things-cli-state-v8.json`. The server caches the model in memory (30 s, background refresh, `?fresh=1`).
+- **Writes:** `things-cli batch`, `edit`, `complete`, `create-tag`, `create-area`, one at a time with safe retries. `APP_READ_ONLY=1` blocks them.
+- **Default bind:** `127.0.0.1:4173`. Off loopback, basic mode needs `APP_PASSWORD` (≥ 16 characters).
+- **Auth:** `APP_AUTH=basic` (default) or `APP_AUTH=passkey` (WebAuthn, origins from `APP_PASSKEY_ORIGINS` or `APP_PUBLIC_ORIGINS`). No TLS in the app.
+- **Lists:** Inbox, Today, Upcoming, Anytime, Someday, Logbook, Trash; projects, areas, headings, tags.
+- **Changes:** create to-dos, projects, headings, areas, tags; complete, reopen, log completed; edit title, notes, checklist, when, deadline, tags; trash and restore; move and reorder.
+- **Docker:** Compose requires `APP_PASSWORD`, `THINGS_USERNAME`, `THINGS_PASSWORD`; data volume at `/data`.
+
+## Authority map (what to read for what)
+
+| Topic | Read |
+| --- | --- |
+| Human quick start, features, testing basics | [README.md](README.md) |
+| **Site overview** | [docs/index.md](docs/index.md) |
+| **Setup, commands, env vars** | [docs/setup.md](docs/setup.md) |
+| **HTTP API reference (routes, shapes, errors)** | [docs/api.md](docs/api.md) |
+| **Architecture, sync, writes, middleware, frontend** | [docs/architecture.md](docs/architecture.md) |
+| **Testing (Go, Playwright, parity)** | [docs/testing.md](docs/testing.md) |
+| **Limitations & open questions** | [docs/limitations.md](docs/limitations.md) |
+| Self-hosted deployment, passkeys, patched CLI, logs | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Security controls & known limits | [docs/SECURITY.md](docs/SECURITY.md) |
+| Parity testing vs. Things for Mac | [docs/PARITY_TESTING.md](docs/PARITY_TESTING.md) |
+
+## Source of truth (when docs disagree with these, the source wins)
+
+- `cmd/nubererum/*.go` — server, CLI adapter, sync model, model cache, writes, security, passkeys, logging.
+- `cmd/nubererum/*_test.go` — Go tests pinning the invariants.
+- `public/*` — frontend and passkey login page.
+- `Dockerfile`, `compose.yaml`, `.env.example` — deployment and config.
+- `patches/things-cloud-sdk-arthursoares.patch` — the CLI patch.
+- `scripts/` — CLI build, launchers, parity tools.
+- `tests/`, `playwright.config.js`, `package.json` — browser and parity tests.
+
+## Generated artifacts (derived from the above)
+
+- [llms.txt](llms.txt) — this compact map.
+- [llms-full.txt](llms-full.txt) — expanded plain-text reference.
+- [docs/repository-map.json](docs/repository-map.json) — machine-readable map.
+- `AGENTS.md` — managed `repository-documentation` block.
+
+## Top safety notes
+
+1. Keep the repo private.
+2. LAN: a long random `APP_PASSWORD`. Internet: `APP_AUTH=passkey` behind a TLS reverse proxy.
+3. Never commit `.env`, `things-cli-state*.json`, `passkeys.json`, `passkey-setup.json`, `bin/`, or local binaries.
+4. Use `APP_READ_ONLY=1` for test instances with a real account; do not run writes against the real account unasked.
+5. Treat the state cache as sensitive — it holds the account's task metadata.

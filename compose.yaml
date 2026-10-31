@@ -1,0 +1,45 @@
+services:
+  nubererum:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nubererum:local
+    container_name: nubererum
+    restart: unless-stopped
+    ports:
+      - "4173:4173"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "4173"
+      TZ: "${TZ:-Europe/Berlin}"
+      DATA_DIR: "/data"
+      THINGS_CLI_CACHE: "/data/things-cli-state-v8.json"
+      APP_USERNAME: "${APP_USERNAME:-admin}"
+      # Basic Auth (default): the app refuses to start off loopback without an
+      # APP_PASSWORD of at least 16 characters. Passkey mode ignores it.
+      APP_AUTH: "${APP_AUTH:-basic}"
+      APP_PASSWORD: "${APP_PASSWORD:-}"
+      APP_PASSKEY_ORIGINS: "${APP_PASSKEY_ORIGINS:-}"
+      THINGS_USERNAME: "${THINGS_USERNAME:?Set THINGS_USERNAME in .env before starting}"
+      THINGS_PASSWORD: "${THINGS_PASSWORD:?Set THINGS_PASSWORD in .env before starting}"
+      # Extra public origins when a proxy rewrites the Host header (comma separated).
+      APP_PUBLIC_ORIGINS: "${APP_PUBLIC_ORIGINS:-}"
+    volumes:
+      - things-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  things-data:

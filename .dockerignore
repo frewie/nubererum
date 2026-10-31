@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+.things-cli-state*.json
+things-cli-state*.json
+data
+bin
+nubererum
+node_modules
+coverage
+dist
+tmp
+*.log
+.DS_Store
+Thumbs.db
