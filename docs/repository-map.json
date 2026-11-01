@@ -137,10 +137,11 @@
     {
       "name": "frontend",
       "path": "public/",
-      "role": "Vanilla JS, no build step. Things-like lists, sidebar, editor, selection, keyboard shortcuts after Things for Mac with a cheat sheet (public/shortcuts.js), drag and drop, touch long press, optimistic updates; remembers only the last list in localStorage.",
+      "role": "Vanilla JS, no build step. Things-like lists, sidebar, editor, selection, keyboard shortcuts after Things for Mac with a cheat sheet (public/shortcuts.js), drag and drop, touch long press, optimistic updates; remembers the last list and the appearance (public/theme.js: System, Light, Dark) in localStorage.",
       "evidence": [
         "public/app.js",
         "public/shortcuts.js",
+        "public/theme.js",
         "public/index.html",
         "public/styles.css",
         "public/manifest.webmanifest"

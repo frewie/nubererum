@@ -287,7 +287,7 @@ A token's scope is a list of project UUIDs, a list of Things tags, or both. A ta
 
 ## Static files
 
-Paths outside `/api/` (and, in passkey mode, `/auth/` and `/login`) are served from `public/`: `index.html`, `app.js`, `shortcuts.js`, `styles.css`, `login.html`, `login.js`, `manifest.webmanifest` and the icons. Paths that leave `public/` get `403`. Unknown paths fall back to `index.html`.
+Paths outside `/api/` (and, in passkey mode, `/auth/` and `/login`) are served from `public/`: `index.html`, `app.js`, `shortcuts.js`, `theme.js`, `styles.css`, `login.html`, `login.js`, `manifest.webmanifest` and the icons. Paths that leave `public/` get `403`. Unknown paths fall back to `index.html`.
 
 ## Status codes
 

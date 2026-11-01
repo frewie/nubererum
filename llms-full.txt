@@ -105,6 +105,7 @@ Writes:
 Frontend (public/app.js):
 - Load: GET /api/status, then GET /api/sync; if the answer is refreshing or older than 30 s, GET /api/sync?fresh=1. Refresh when visible again after 1 minute and every 5 minutes while visible.
 - Optimistic changes with rollback on failure; new to-dos at the top; completed to-dos greyed until logged.
+- Appearance: sidebar "Appearance" cycles System/Light/Dark; public/theme.js (in <head>, also on the login page) sets data-theme on <html>; kept in localStorage things-theme.
 - Shortcuts (public/shortcuts.js, loaded before app.js): after Things for Mac; Mod = Cmd on a Mac, Ctrl elsewhere; matched by event.code. n new to-do, Space new to-do below the selection, paste adds one to-do per line, Enter open, Esc close/clear, Mod+K complete, Mod+D duplicate, Mod+C copy titles, Mod+Shift+Y log completed, Delete/Backspace trash (with Undo), arrows/Shift/Alt/Mod+A select, Mod+arrows move, Mod+Shift+M Move dialog, Mod+T/R/O Today/Anytime/Someday, Ctrl+]/[ start date +/-1 day (Shift: week), Ctrl+./, deadline +/-1 day (Shift: week), Mod+Shift+T tags, 1-6 and Mod+1-6 lists (Inbox, Today, Upcoming, Anytime, Someday, Logbook), Mod+Shift+O navigation popover, Mod+L show in parent, Mod+Left back, Mod+/ sidebar, / and Mod+F search, r refresh. Combinations browsers keep (Mod+N/T/W and Shift variants) also work with Alt. ? or "Shortcuts" in the sidebar opens a cheat sheet generated from the same table; unavailable Things shortcuts (This Evening, cancel, repetition, Markdown) are greyed out.
 - Drag and drop with pointer events; on touch screens a long press (450 ms) selects or starts a drag.
 - Notes rendered as text; http(s):// and www. links become anchors with rel="noopener noreferrer"; other schemes refused.
@@ -165,7 +166,7 @@ POST /auth/register/begin {setupCode?, name?} (needs session or setup code) -> {
 POST /auth/logout -> {authenticated:false}
 Unauthenticated /api/* -> 401 {"error":"Sign in with your passkey.","login":"/login"}; pages redirect to /login.
 
-Static: other paths from public/ (index.html, app.js, shortcuts.js, styles.css, login.html, login.js, manifest.webmanifest, icons); paths leaving public/ -> 403; unknown paths -> index.html.
+Static: other paths from public/ (index.html, app.js, shortcuts.js, theme.js, styles.css, login.html, login.js, manifest.webmanifest, icons); paths leaving public/ -> 403; unknown paths -> index.html.
 
 Status codes: 400 invalid input; 401 no account / no session / Basic Auth; 403 read-only, server-managed login/logout, same-origin guard, traversal, unknown passkey origin, wrong setup code; 404 unknown API route; 405 method; 409 model changed, refresh; 415 not JSON; 424 no things-cli; 429 sign-in lockout; 500 unexpected error or panic; 502 things-cli failed or printed non-JSON.
 
