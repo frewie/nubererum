@@ -67,12 +67,32 @@ const icons = {
   checklist: `<svg class="icon" viewBox="0 0 20 20"><path d="M3.5 5.5l1.5 1.5 2.5-3M3.5 13l1.5 1.5 2.5-3M10 5.5h6.5M10 13h6.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   bell: `<svg class="icon" viewBox="0 0 20 20"><path d="M5.5 14V9a4.5 4.5 0 0 1 9 0v5l1.5 1.5h-12z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.3 17.2a1.8 1.8 0 0 0 3.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   flag: `<svg class="icon" viewBox="0 0 20 20"><path d="M5 17V3.5M5 4h9l-2 3.5 2 3.5H5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  "theme-system": `<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg>`,
+  "theme-light": `<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.5v1.8M10 15.7v1.8M2.5 10h1.8M15.7 10h1.8M4.7 4.7l1.3 1.3M14 14l1.3 1.3M4.7 15.3 6 14M14 6l1.3-1.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+  "theme-dark": `<svg class="icon" viewBox="0 0 20 20"><path d="M15.8 12.6A6.6 6.6 0 0 1 7.4 4.2a6.7 6.7 0 1 0 8.4 8.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
 };
 
 function fillIcons(root = document) {
   root.querySelectorAll("[data-icon]").forEach((element) => {
     element.innerHTML = icons[element.dataset.icon] || "";
   });
+}
+
+// The theme switch cycles System → Light → Dark (theme.js applies and keeps it).
+const themeNames = { system: "System", light: "Light", dark: "Dark" };
+
+function cycleTheme() {
+  const { modes, current, set } = window.appTheme;
+  set(modes[(modes.indexOf(current()) + 1) % modes.length]);
+}
+
+function renderThemeButton() {
+  const mode = window.appTheme.current();
+  const icon = els.themeButton.querySelector(".nav-icon");
+  icon.dataset.icon = `theme-${mode}`;
+  fillIcons(els.themeButton);
+  els.themeButton.querySelector(".theme-value").textContent = themeNames[mode];
+  els.themeButton.title = `Appearance: ${themeNames[mode]} (click to change)`;
 }
 
 // Refresh in the background when the page comes back after this long, and
@@ -100,6 +120,7 @@ const els = {
   newProjectButton: document.querySelector("#new-project-button"),
   newAreaButton: document.querySelector("#new-area-button"),
   shortcutsButton: document.querySelector("#shortcuts-button"),
+  themeButton: document.querySelector("#theme-button"),
   projects: document.querySelector("#projects"),
   quickAdd: document.querySelector("#quick-add"),
   refresh: document.querySelector("#refresh"),
@@ -3150,6 +3171,9 @@ async function init() {
   // Linux).
   document.addEventListener("keydown", handleShortcut);
   els.shortcutsButton.addEventListener("click", openCheatSheet);
+  els.themeButton.addEventListener("click", cycleTheme);
+  window.addEventListener("themechange", renderThemeButton);
+  renderThemeButton();
 
   els.search.addEventListener("input", () => {
     state.query = els.search.value;

@@ -16,7 +16,7 @@ This block is managed by the repository-documenter. Do not edit the surrounding 
 
 ### One-paragraph map
 
-A self-hosted Go (1.26) web app to view and edit Things 3 tasks in Things Cloud. There is no official Things Cloud API, so the server (`cmd/nubererum/`) runs `things-cli` (from `arthursoares/things-cloud-sdk` v0.6.0 plus `patches/things-cloud-sdk-arthursoares.patch`) as a child process. Reads run `things-cli list` and `things-cli today` and build the model from the CLI state cache `things-cli-state-v8.json`; the server keeps the last model in memory (`modelcache.go`) and refreshes it in the background. Writes go through `things-cli batch` (and `edit`, `complete`, `create-tag`, `create-area`) one at a time with safe retries (`writes.go`). A dependency-free static frontend in `public/` mimics Things: lists, Logbook, Trash, sidebar, editor, selection, keyboard shortcuts (`public/shortcuts.js`), drag and drop. Auth is Basic Auth (`APP_AUTH=basic`, default) or WebAuthn passkeys (`APP_AUTH=passkey`). The API is listed in `docs/api.md`.
+A self-hosted Go (1.26) web app to view and edit Things 3 tasks in Things Cloud. There is no official Things Cloud API, so the server (`cmd/nubererum/`) runs `things-cli` (from `arthursoares/things-cloud-sdk` v0.6.0 plus `patches/things-cloud-sdk-arthursoares.patch`) as a child process. Reads run `things-cli list` and `things-cli today` and build the model from the CLI state cache `things-cli-state-v8.json`; the server keeps the last model in memory (`modelcache.go`) and refreshes it in the background. Writes go through `things-cli batch` (and `edit`, `complete`, `create-tag`, `create-area`) one at a time with safe retries (`writes.go`). A dependency-free static frontend in `public/` mimics Things: lists, Logbook, Trash, sidebar, editor, selection, keyboard shortcuts (`public/shortcuts.js`), drag and drop, light and dark appearance (`public/theme.js`). Auth is Basic Auth (`APP_AUTH=basic`, default) or WebAuthn passkeys (`APP_AUTH=passkey`). The API is listed in `docs/api.md`.
 
 ### Invariants and non-obvious facts (verify before changing)
 
@@ -47,6 +47,7 @@ A self-hosted Go (1.26) web app to view and edit Things 3 tasks in Things Cloud.
 | `cmd/nubererum/*_test.go` | Go tests pinning the invariants |
 | `public/index.html`, `public/app.js`, `public/styles.css` | Frontend (no build step) |
 | `public/shortcuts.js` | Keyboard shortcut table after Things for Mac and the cheat sheet (`?`); loaded before `app.js` |
+| `public/theme.js` | Light/dark/system appearance; loaded in `<head>` of both pages so nothing flashes |
 | `public/login.html`, `public/login.js` | Passkey login page |
 | `Dockerfile`, `compose.yaml`, `.env.example` | Image (builds the patched `things-cli`) and Compose config |
 | `patches/things-cloud-sdk-arthursoares.patch` | SDK patch: old history kinds, list rules, write operations |

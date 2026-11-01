@@ -18,7 +18,7 @@ NubeRerum is one Go binary (module `nubererum`, `go 1.26.4`) plus a static front
 | Compression | `compress.go` | gzip for JSON, HTML, CSS, JS, SVG and the manifest. |
 | Logging | `logging.go` | key=value logs on stderr, failed-request logging, account redaction, `/api/client-error`. |
 | Static files | `main.go` (`staticHandler`) | Serves `public/` with a containment check. |
-| Frontend | `public/index.html`, `public/app.js`, `public/shortcuts.js`, `public/styles.css`, `public/login.html`, `public/login.js`, `public/manifest.webmanifest`, icons | UI, keyboard shortcuts and passkey login page. |
+| Frontend | `public/index.html`, `public/app.js`, `public/shortcuts.js`, `public/theme.js`, `public/styles.css`, `public/login.html`, `public/login.js`, `public/manifest.webmanifest`, icons | UI, keyboard shortcuts and passkey login page. |
 
 ## Request path
 
@@ -136,6 +136,7 @@ The HTTP server sets header (10 s), read (30 s), write (10 min, for the first sy
 - Drag and drop with pointer events: reorder to-dos, checklist items, projects and areas; drop selected to-dos on a project, area, heading, Today, Anytime or Someday; move projects between areas. On touch screens a long press selects or starts a drag.
 - Notes are rendered as text; `http(s)://` and `www.` links become anchors with `rel="noopener noreferrer"`; other schemes are refused.
 - Browser errors and failed requests are reported to `/api/client-error` (at most 20 per page).
+- Appearance: "Appearance" in the sidebar cycles System, Light and Dark. `public/theme.js` (loaded in `<head>`, also on the login page) sets `data-theme` on `<html>` before the page paints; System follows `prefers-color-scheme`. The choice is kept in `localStorage` (`things-theme`).
 - The last opened list is remembered in `localStorage` (`things-view`). Credentials are never stored in the browser.
 - In passkey mode, a 401 sends the page to `/login`; the sidebar shows a "Passkeys" link. `public/login.js` runs the WebAuthn ceremonies.
 

@@ -450,6 +450,7 @@ var publicPaths = map[string]bool{
 	"/login":                 true,
 	"/login.js":              true,
 	"/styles.css":            true,
+	"/theme.js":              true,
 	"/manifest.webmanifest":  true,
 	"/icon.svg":              true,
 	"/icon-192.png":          true,
