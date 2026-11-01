@@ -16,6 +16,14 @@
   --red: #e0443e;
   --yellow: #f2b705;
   --teal: #2a9d8f;
+  --row-selected: #d8e6fb;
+  --check-border: #b4bac3;
+  --shimmer: #f6f7f9;
+  --toast-bg: #1d2430;
+  --toast-action: #9fc2ff;
+  --note-border: #f1d69a;
+  --note-bg: #fff8e7;
+  --note-text: #755209;
   font-family:
     -apple-system,
     BlinkMacSystemFont,
@@ -23,6 +31,66 @@
     system-ui,
     sans-serif;
   font-size: 15px;
+}
+
+/* Dark theme: follows the device unless a theme is picked (theme.js sets
+   data-theme on <html>). Keep both blocks the same. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1e1f23;
+    --sidebar: #25262b;
+    --panel: #2a2b31;
+    --hover: #303238;
+    --selected: #3a3d45;
+    --line: #3b3e45;
+    --line-soft: #303237;
+    --text: #e4e6ea;
+    --muted: #9aa1ac;
+    --faint: #6d737d;
+    --accent: #4a8ff0;
+    --accent-soft: #24385a;
+    --green: #34b36a;
+    --red: #ef5a54;
+    --yellow: #f2b705;
+    --teal: #3bb3a4;
+    --row-selected: #2b4672;
+    --check-border: #5d636d;
+    --shimmer: #383a40;
+    --toast-bg: #3c3f47;
+    --toast-action: #9fc2ff;
+    --note-border: #6b5520;
+    --note-bg: #2f2814;
+    --note-text: #f1d69a;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1f23;
+  --sidebar: #25262b;
+  --panel: #2a2b31;
+  --hover: #303238;
+  --selected: #3a3d45;
+  --line: #3b3e45;
+  --line-soft: #303237;
+  --text: #e4e6ea;
+  --muted: #9aa1ac;
+  --faint: #6d737d;
+  --accent: #4a8ff0;
+  --accent-soft: #24385a;
+  --green: #34b36a;
+  --red: #ef5a54;
+  --yellow: #f2b705;
+  --teal: #3bb3a4;
+  --row-selected: #2b4672;
+  --check-border: #5d636d;
+  --shimmer: #383a40;
+  --toast-bg: #3c3f47;
+  --toast-action: #9fc2ff;
+  --note-border: #6b5520;
+  --note-bg: #2f2814;
+  --note-text: #f1d69a;
 }
 
 * {
@@ -126,6 +194,7 @@ svg.icon {
   background: var(--selected);
 }
 
+.theme-value,
 .nav-item strong,
 .mini-item .count {
   color: var(--muted);
@@ -477,7 +546,7 @@ h1 {
 
 .task-row.selected,
 .task-row.selected:hover {
-  background: #d8e6fb;
+  background: var(--row-selected);
 }
 
 .task-row.done .task-title {
@@ -576,6 +645,7 @@ h1 {
   padding: 2px 4px;
   border: 1px solid transparent;
   border-radius: 5px;
+  background: transparent;
   color: var(--muted);
   font-size: 13px;
 }
@@ -680,7 +750,7 @@ h1 {
   width: 13px;
   height: 13px;
   padding: 0;
-  border: 1.4px solid #b4bac3;
+  border: 1.4px solid var(--check-border);
   border-radius: 50%;
   background: var(--panel);
   cursor: pointer;
@@ -727,7 +797,7 @@ h1 {
   padding: 0;
   border: 0;
   background: transparent;
-  color: #9fc2ff;
+  color: var(--toast-action);
   font: inherit;
   font-weight: 700;
   cursor: pointer;
@@ -820,7 +890,7 @@ body.is-dragging * {
   height: 15px;
   margin-top: 3px;
   padding: 0;
-  border: 1.5px solid #b4bac3;
+  border: 1.5px solid var(--check-border);
   border-radius: 4px;
   background: var(--panel);
   cursor: pointer;
@@ -1015,7 +1085,7 @@ body.is-dragging * {
 .skeleton-row {
   height: 22px;
   border-radius: 6px;
-  background: linear-gradient(90deg, var(--line-soft) 25%, #f6f7f9 50%, var(--line-soft) 75%);
+  background: linear-gradient(90deg, var(--line-soft) 25%, var(--shimmer) 50%, var(--line-soft) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.2s ease-in-out infinite;
 }
@@ -1048,7 +1118,7 @@ body.is-dragging * {
   max-width: min(520px, 100%);
   padding: 9px 14px;
   border-radius: 8px;
-  background: var(--text);
+  background: var(--toast-bg);
   color: #fff;
   font-size: 14px;
   box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
@@ -1155,10 +1225,10 @@ dialog.new-project select {
 .signin-panel .backend-note {
   display: none;
   padding: 10px 12px;
-  border: 1px solid #f1d69a;
+  border: 1px solid var(--note-border);
   border-radius: 8px;
-  background: #fff8e7;
-  color: #755209;
+  background: var(--note-bg);
+  color: var(--note-text);
   font-size: 13px;
 }
 

@@ -21,6 +21,40 @@ test("quick add is hidden when the current view cannot accept tasks", async ({ p
   await expect(page.locator("#quick-add")).toBeHidden();
 });
 
+test("the appearance switch cycles System, Light and Dark and is remembered", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/");
+  const root = page.locator("html");
+  const button = page.locator("#theme-button");
+  const background = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  await expect(button).toContainText("System");
+  await expect(root).not.toHaveAttribute("data-theme");
+  expect(await background()).toBe("rgb(30, 31, 35)");
+
+  await button.click();
+  await expect(button).toContainText("Light");
+  await expect(root).toHaveAttribute("data-theme", "light");
+  expect(await background()).toBe("rgb(255, 255, 255)");
+
+  await button.click();
+  await expect(button).toContainText("Dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  expect(await background()).toBe("rgb(30, 31, 35)");
+
+  // The choice survives a reload, also on the login page.
+  await page.reload();
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await expect(button).toContainText("Dark");
+  await page.goto("/login.html");
+  await expect(root).toHaveAttribute("data-theme", "dark");
+
+  await page.goto("/");
+  await button.click();
+  await expect(button).toContainText("System");
+  expect(await page.evaluate(() => localStorage.getItem("things-theme"))).toBeNull();
+  expect(await background()).toBe("rgb(255, 255, 255)");
+});
+
 test("settings disconnects the active Things Cloud session", async ({ page }) => {
   let loggedOut = false;
   await page.route("**/api/**", async (route) => {
