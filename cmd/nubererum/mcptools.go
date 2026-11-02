@@ -599,6 +599,9 @@ func (s *mcpServer) createTodo(arguments json.RawMessage, token mcpToken) (map[s
 	}
 	if heading != nil {
 		op["heading"] = args.Heading
+		// Under a heading the project comes from the heading, as Things writes
+		// it (agr with an empty pr); with both, the web app missed the heading.
+		delete(op, "project")
 	}
 	var task map[string]any
 	ids, err := mcpBatch([]map[string]any{op}, func(ids []string) func(map[string]any) map[string]any {

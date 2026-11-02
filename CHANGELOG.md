@@ -4,6 +4,10 @@ All notable changes to NubeRerum. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Fixes
+
+- To-dos created under a heading over MCP (`create_todo` with `heading`) showed without their heading in the web app, while Things showed them under it. The web app now reads them like Things does, and new ones are written like Things writes them (the heading only, no separate project).
+
 ## [0.2.0] - 2026-11-02
 
 ### Features
