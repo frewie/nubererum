@@ -75,3 +75,16 @@ A self-hosted Go (1.26) web app to view and edit Things 3 tasks in Things Cloud.
 - Preserve Basic Auth and its lockout, passkey checks, the same-origin guard, `exec.Command` argv usage, input validation, account redaction in logs, and the static-file containment check when editing the server.
 - Keep the Today-membership, visible-filter and logbook invariants intact; update the guarding tests together with any change.
 - The MkDocs site maps to `mkdocs.yml` under `docs/`.
+
+## Workflow and releases
+
+The owner's standard for this repository. It is not part of the generated block above; edit it by hand.
+
+- **One long-lived branch: `main`.** No `develop`. `main` is protected: the CI checks `test` and `docker` must pass, no force pushes, no deletions.
+- **Every change goes through a pull request into `main`:** a short-lived branch per feature or fix (`feature/…`, `fix/…`, `docs/…`), `scripts/check.sh --race` locally, then the PR. Plain commit messages and PR descriptions; no co-author or tool attribution lines.
+- **The changelog is part of the change.** Add every user-visible change to `## [Unreleased]` in `CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/) groups: Features, Changes, Fixes, Security), in the same PR.
+- **Releases are version tags on `main`**, made when a few changes have piled up, not after every PR. Versions follow [SemVer](https://semver.org/spec/v2.0.0.html); `0.x` while the app is still changing (new features raise the minor, fixes the patch).
+  1. In a release PR, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a new empty `## [Unreleased]` above it and update the compare links at the bottom.
+  2. After the merge, tag the merge commit: `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+  3. `.github/workflows/release.yml` checks that the tag is on `main`, publishes the image `ghcr.io/<owner>/nubererum:X.Y.Z` and `:latest` (amd64, arm64) and creates the GitHub release with that version's changelog section as its notes (`scripts/release-notes.sh X.Y.Z`; no section, no release).
+- Dependabot PRs go to `main` like every other change.

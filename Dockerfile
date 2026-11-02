@@ -1,11 +1,15 @@
-FROM golang:1.26-alpine AS build
+# The build stage runs on the build machine and cross-compiles, so the
+# multi-platform release image (amd64, arm64) needs no emulated Go build.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nubererum ./cmd/nubererum
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/nubererum ./cmd/nubererum
 
 # things-cli from the original SDK, pinned to a release, plus a small patch for
 # what Things' lists still need (see docs/DEPLOYMENT.md, "Patched Things CLI").
@@ -17,7 +21,7 @@ RUN apk add --no-cache git \
   && test "$(git -C /tmp/things-cloud-sdk rev-parse HEAD)" = "$THINGS_SDK_COMMIT" \
   && git -C /tmp/things-cloud-sdk apply /src/patches/things-cloud-sdk-arthursoares.patch \
   && cd /tmp/things-cloud-sdk \
-  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/things-cli ./cmd/things-cli
+  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/things-cli ./cmd/things-cli
 
 FROM alpine:3.24
 

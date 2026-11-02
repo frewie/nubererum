@@ -21,6 +21,7 @@ It runs gofmt, `go vet` and the Go tests (plus the race detector), the parity un
 
 ## Rules
 
+- **Pull requests go into `main`** (there is no `develop` branch). Add user-visible changes to `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md); releases are version tags on `main` (see [`AGENTS.md`](AGENTS.md), "Workflow and releases").
 - **No real Things account in tests.** The Go tests stub `things-cli`, and the Playwright tests mock the API. Never commit credentials, `.env`, `things-cli-state*.json`, `passkeys.json`, `passkey-setup.json` or `bin/`.
 - **Writes copy what Things itself writes.** There is no official API: every new write mirrors a payload seen in a real Things history and is covered by a wire test in the SDK patch. Do not guess payloads; a malformed write can disturb every Things device on the account.
 - Keep the invariants listed in [`AGENTS.md`](AGENTS.md) (Today membership, the visible filter, the Logbook rule, one write at a time) and the security controls in [`docs/SECURITY.md`](docs/SECURITY.md).
