@@ -1152,6 +1152,8 @@ dialog.new-project {
   width: min(400px, calc(100% - 32px));
   padding: 20px;
   border: 0;
+  background: var(--panel);
+  color: var(--text);
   border-radius: 12px;
   box-shadow: 0 12px 40px rgb(0 0 0 / 25%);
 }
@@ -1825,4 +1827,133 @@ h1 .rename-input {
 
 .area-toggle:hover {
   background: var(--line);
+}
+
+/* MCP Tokens dialog */
+
+dialog.new-project.wide {
+  width: min(560px, calc(100% - 32px));
+}
+
+.mcp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.mcp-row-main {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mcp-access {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.mcp-detail {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.mcp-section {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+#mcp-created {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.mcp-section h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.mcp-section fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mcp-section legend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mcp-choices {
+  display: grid;
+  gap: 2px;
+  max-height: 140px;
+  padding: 6px 8px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+dialog.new-project .mcp-choices label,
+dialog.new-project label.mcp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+dialog.new-project .mcp-choices input,
+dialog.new-project .mcp-check input {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.mcp-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.mcp-secret {
+  display: flex;
+  gap: 8px;
+}
+
+.mcp-secret input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.mcp-command,
+dialog.new-project code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.mcp-command {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-radius: 7px;
+  background: var(--sidebar);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

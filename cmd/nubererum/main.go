@@ -1290,6 +1290,12 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		handleProjectComplete(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/heading-delete":
 		handleHeadingDelete(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/mcp-tokens":
+		handleMCPTokens(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/mcp-token-create":
+		handleMCPTokenCreate(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/mcp-token-remove":
+		handleMCPTokenRemove(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/log-completed":
 		handleLogCompleted(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/complete":

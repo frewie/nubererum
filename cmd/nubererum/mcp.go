@@ -128,11 +128,14 @@ type mcpTokenData struct {
 
 // mcpTokenStore keeps the API tokens in DATA_DIR/mcp-tokens.json. Like the
 // passkey store it is read on every use, so the CLI subcommands apply to the
-// running server immediately.
+// running server immediately. All stores in the process share one lock, so
+// the MCP endpoint (last use) and the web app (create, remove) do not
+// overwrite each other.
 type mcpTokenStore struct {
-	mu   sync.Mutex
 	path string
 }
+
+var mcpTokenFileMu sync.Mutex
 
 func newMCPTokenStore(dir string) *mcpTokenStore {
 	return &mcpTokenStore{path: filepath.Join(dir, mcpTokenFileName)}
@@ -154,14 +157,14 @@ func (s *mcpTokenStore) read() (mcpTokenData, error) {
 }
 
 func (s *mcpTokenStore) load() (mcpTokenData, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mcpTokenFileMu.Lock()
+	defer mcpTokenFileMu.Unlock()
 	return s.read()
 }
 
 func (s *mcpTokenStore) update(change func(*mcpTokenData) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mcpTokenFileMu.Lock()
+	defer mcpTokenFileMu.Unlock()
 	data, err := s.read()
 	if err != nil {
 		return err
@@ -770,6 +773,10 @@ func (s *mcpServer) callTool(name string, arguments json.RawMessage, token mcpTo
 		return s.createProject(arguments, token)
 	case "update_project":
 		return s.updateProject(arguments, token)
+	case "create_heading":
+		return s.createHeading(arguments, token)
+	case "update_heading":
+		return s.updateHeading(arguments, token)
 	case "list_tags":
 		result, err := models.cached()
 		if err != nil {

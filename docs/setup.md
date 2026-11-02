@@ -130,7 +130,7 @@ In passkey mode, run these inside the container (or next to the binary with the 
 | Create a one-time setup code (30 minutes) | `docker exec nubererum nubererum passkey-setup` |
 | List passkeys | `docker exec nubererum nubererum passkey-list` |
 | Remove a passkey | `docker exec nubererum nubererum passkey-remove <id or first 6+ characters>` |
-| Create an MCP token for a coding agent | `docker exec nubererum nubererum mcp-token-create --name <name> --project <uuid> [--read-only]` |
+| Create an MCP token for a coding agent | "MCP Tokens" in the sidebar, or `docker exec nubererum nubererum mcp-token-create --name <name> --project <uuid> [--read-only]` |
 | Show project UUIDs for MCP tokens | `docker exec nubererum nubererum mcp-token-projects` |
 | List or remove MCP tokens | `docker exec nubererum nubererum mcp-token-list` / `mcp-token-remove <name>` |
 
