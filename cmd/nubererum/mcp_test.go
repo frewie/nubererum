@@ -135,8 +135,12 @@ fi
 					} else if op["cmd"] == "create" && op["type"] == "project" {
 						createdProjects = append(createdProjects, map[string]any{"uuid": mcpNewUUID1, "title": op["title"], "when": asString(op, "when"), "count": 0, "tags": []string{}, "area": asString(op, "area")})
 					} else if op["cmd"] == "create" {
+						project := asString(op, "project")
+						if asString(op, "heading") == mcpHeadingA {
+							project = mcpProjectA
+						}
 						// The fake CLI reports mcpNewUUID1 for the first result.
-						created = append(created, map[string]any{"uuid": mcpNewUUID1, "title": op["title"], "note": asString(op, "note"), "status": "open", "project": asString(op, "project"), "heading": asString(op, "heading"), "headingTitle": "", "schedule": "anytime", "scheduledDate": "", "deadline": "", "tags": []string{}, "index": 9999, "checklist": []map[string]any{}})
+						created = append(created, map[string]any{"uuid": mcpNewUUID1, "title": op["title"], "note": asString(op, "note"), "status": "open", "project": project, "heading": asString(op, "heading"), "headingTitle": "", "schedule": "anytime", "scheduledDate": "", "deadline": "", "tags": []string{}, "index": 9999, "checklist": []map[string]any{}})
 					}
 				}
 			}
@@ -894,7 +898,7 @@ func TestMCPCreateTodoInAllowedProject(t *testing.T) {
 		t.Fatalf("missing tag not created: %s", h.calls())
 	}
 	create := h.batchOps(0)
-	if len(create) != 1 || create[0]["cmd"] != "create" || create[0]["project"] != mcpProjectA || create[0]["heading"] != mcpHeadingA || create[0]["title"] != "Ship it" || create[0]["note"] != "Details" || create[0]["extra"].(map[string]any)["scheduled"] != "2026-12-01" {
+	if len(create) != 1 || create[0]["cmd"] != "create" || create[0]["project"] != nil || create[0]["heading"] != mcpHeadingA || create[0]["title"] != "Ship it" || create[0]["note"] != "Details" || create[0]["extra"].(map[string]any)["scheduled"] != "2026-12-01" {
 		t.Fatalf("create ops = %v", create)
 	}
 	// One write per item and commit: tags, deadline and reorder for the new

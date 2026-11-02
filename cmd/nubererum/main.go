@@ -799,6 +799,21 @@ func recountCollection(value any, counts map[string]int) []map[string]any {
 	return result
 }
 
+// parentOf returns the item a to-do or heading belongs to. Things files a
+// to-do under a heading with agr and an empty pr and shows it under the
+// heading; when a write set both (creates with project and heading before
+// 0.2.1), the heading wins as in Things.
+func parentOf(task map[string]any, tasks map[string]map[string]any) string {
+	heading := firstString(asStringSlice(task["ActionGroupIDs"]))
+	if heading != "" && int(asNumber(tasks[heading], "Type")) == 2 {
+		return heading
+	}
+	if parent := firstString(asStringSlice(task["ParentTaskIDs"])); parent != "" {
+		return parent
+	}
+	return heading
+}
+
 func findProjectID(taskID string, tasks map[string]map[string]any) string {
 	seen := map[string]bool{}
 	current := taskID
@@ -808,10 +823,7 @@ func findProjectID(taskID string, tasks map[string]map[string]any) string {
 			return ""
 		}
 		seen[current] = true
-		parentID := firstString(asStringSlice(task["ParentTaskIDs"]))
-		if parentID == "" {
-			parentID = firstString(asStringSlice(task["ActionGroupIDs"]))
-		}
+		parentID := parentOf(task, tasks)
 		if parentID == "" {
 			return ""
 		}
@@ -835,10 +847,7 @@ func findHeadingID(taskID string, tasks map[string]map[string]any) string {
 			return ""
 		}
 		seen[current] = true
-		parentID := firstString(asStringSlice(task["ParentTaskIDs"]))
-		if parentID == "" {
-			parentID = firstString(asStringSlice(task["ActionGroupIDs"]))
-		}
+		parentID := parentOf(task, tasks)
 		if parentID == "" {
 			return ""
 		}
@@ -1415,6 +1424,10 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 			if value = strings.TrimSpace(value); value != "" {
 				op[key] = value
 			}
+		}
+		// Under a heading the project comes from the heading, as Things writes it.
+		if op["heading"] != nil {
+			delete(op, "project")
 		}
 		input, _ := json.Marshal([]map[string]any{op})
 		out, err := runCLIBatch(input)

@@ -692,3 +692,24 @@ func TestCompletedTodayStaysInTodayAfterCLIToday(t *testing.T) {
 		t.Fatalf("today = %v, want the completed to-do kept", today)
 	}
 }
+
+// A to-do created with both project and heading carries pr and agr; Things
+// shows it under the heading, so the model must too.
+func TestHeadingWinsOverProjectParent(t *testing.T) {
+	tasks := map[string]map[string]any{
+		"project": {"Type": 1.0},
+		"heading": {"Type": 2.0, "ParentTaskIDs": []any{"project"}},
+		"both":    {"Type": 0.0, "ParentTaskIDs": []any{"project"}, "ActionGroupIDs": []any{"heading"}},
+		"agr":     {"Type": 0.0, "ParentTaskIDs": []any{}, "ActionGroupIDs": []any{"heading"}},
+		"pr":      {"Type": 0.0, "ParentTaskIDs": []any{"project"}, "ActionGroupIDs": []any{}},
+		"stale":   {"Type": 0.0, "ParentTaskIDs": []any{"project"}, "ActionGroupIDs": []any{"gone"}},
+	}
+	for id, want := range map[string]string{"both": "heading", "agr": "heading", "pr": "", "stale": ""} {
+		if got := findHeadingID(id, tasks); got != want {
+			t.Errorf("findHeadingID(%s) = %q, want %q", id, got, want)
+		}
+		if got := findProjectID(id, tasks); got != "project" {
+			t.Errorf("findProjectID(%s) = %q, want project", id, got)
+		}
+	}
+}
