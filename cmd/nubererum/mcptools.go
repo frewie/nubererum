@@ -11,17 +11,21 @@ import (
 	"time"
 )
 
-// Write tools of the MCP endpoint: create_todo, update_todo, reorder_todo
-// and the checklist tools. Each composes the same things-cli operations and
+// Write tools of the MCP endpoint: create_todo, update_todo, reorder_todo,
+// the heading and project tools and the checklist tools. Each composes the same things-cli operations and
 // cached-model patches as the web app's endpoints (main.go create, edits.go,
 // details.go, reorder.go), after checking the token's projects.
 
 const mcpMaxChecklistItems = 50
 
+// mcpMaxHeadingTodos caps the to-dos create_heading files under the new heading.
+const mcpMaxHeadingTodos = 50
+
 // mcpWriteTools are refused for read-only tokens and read-only instances,
 // and count against the token's hourly write limit.
 var mcpWriteTools = map[string]bool{
 	"complete_todo": true, "create_todo": true, "update_todo": true, "reorder_todo": true, "create_project": true, "update_project": true,
+	"create_heading": true, "update_heading": true,
 	"add_checklist_items": true, "update_checklist_item": true, "remove_checklist_item": true, "reorder_checklist": true,
 }
 
@@ -391,6 +395,123 @@ func (s *mcpServer) updateProject(arguments json.RawMessage, token mcpToken) (ma
 	}
 	models.wrote(withCollectionItem("projects", args.UUID, "projectTitle", args.Title, args.Note))
 	return map[string]any{"updated": true, "uuid": args.UUID, "title": args.Title, "note": args.Note}, nil
+}
+
+// createHeading serves create_heading: a heading at the end of a project
+// the token may access, like POST /api/create with type heading, and
+// optionally the given to-dos of that project filed under it.
+func (s *mcpServer) createHeading(arguments json.RawMessage, token mcpToken) (map[string]any, error) {
+	var args struct {
+		Project string   `json:"project"`
+		Title   string   `json:"title"`
+		Todos   []string `json:"todos"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, mcpFail(http.StatusBadRequest, "Invalid arguments.")
+	}
+	args.Project = strings.TrimSpace(args.Project)
+	title := strings.TrimSpace(args.Title)
+	if !validThingsID(args.Project) {
+		return nil, mcpFail(http.StatusBadRequest, "A valid project UUID is required.")
+	}
+	if title == "" || !validText(title, 500) {
+		return nil, mcpFail(http.StatusBadRequest, "The title must be 1-500 characters and not start with --.")
+	}
+	if len(args.Todos) > mcpMaxHeadingTodos {
+		return nil, mcpFail(http.StatusBadRequest, fmt.Sprintf("At most %d to-dos per call.", mcpMaxHeadingTodos))
+	}
+	result, err := models.cached()
+	if err != nil {
+		return nil, err
+	}
+	if !token.allowed(result.model)[args.Project] {
+		return nil, mcpFail(http.StatusForbidden, "This token may not access that project.")
+	}
+	todos := []string{}
+	for _, uuid := range args.Todos {
+		uuid = strings.TrimSpace(uuid)
+		if task := mcpFindTask(result.model, uuid); task == nil || asString(task, "project") != args.Project {
+			return nil, mcpFail(http.StatusBadRequest, fmt.Sprintf("The to-do %q is not in that project; see list_todos.", uuid))
+		}
+		if !slicesContains(todos, uuid) {
+			todos = append(todos, uuid)
+		}
+	}
+	// Like Things, a new heading goes to the end of the project.
+	index, last := lastHeadingIndex(args.Project)
+	var heading map[string]any
+	ids, err := mcpBatch([]map[string]any{{"cmd": "create", "type": "heading", "title": title, "project": args.Project, "when": "anytime"}}, func(ids []string) func(map[string]any) map[string]any {
+		if len(ids) == 0 || ids[0] == "" {
+			return func(model map[string]any) map[string]any { return model }
+		}
+		heading = map[string]any{"uuid": ids[0], "title": title, "project": args.Project, "index": index}
+		return withNewHeading(heading)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if heading == nil {
+		return nil, mcpFail(http.StatusBadGateway, "Things Cloud did not report the new heading.")
+	}
+	uuid := ids[0]
+
+	// The position and the to-dos need the UUID: a second batch.
+	ops := []map[string]any{}
+	if last {
+		ops = append(ops, map[string]any{"cmd": "reorder", "uuid": uuid, "index": index})
+	}
+	for _, todo := range todos {
+		ops = append(ops, map[string]any{"cmd": "move", "uuid": todo, "heading": uuid})
+	}
+	if len(ops) > 0 {
+		_, err = mcpBatch(ops, func([]string) func(map[string]any) map[string]any {
+			return withTasksChanged(todos, func(task map[string]any) {
+				task["heading"], task["headingTitle"] = uuid, title
+			})
+		})
+		if err != nil {
+			return nil, mcpFail(http.StatusBadGateway, fmt.Sprintf("The heading %s was created, but: %s. File the to-dos with update_todo (heading).", uuid, strings.TrimSuffix(err.Error(), ".")))
+		}
+	}
+	return map[string]any{"created": true, "heading": map[string]any{"uuid": uuid, "title": title, "index": index}, "todos": todos}, nil
+}
+
+// updateHeading serves update_heading: renames a heading of a project the
+// token may access, like renaming it in the web app (POST /api/update).
+func (s *mcpServer) updateHeading(arguments json.RawMessage, token mcpToken) (map[string]any, error) {
+	var args struct {
+		UUID  string `json:"uuid"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, mcpFail(http.StatusBadRequest, "Invalid arguments.")
+	}
+	uuid, title := strings.TrimSpace(args.UUID), strings.TrimSpace(args.Title)
+	if !validThingsID(uuid) {
+		return nil, mcpFail(http.StatusBadRequest, "A valid heading UUID is required.")
+	}
+	if title == "" || !validText(title, 500) {
+		return nil, mcpFail(http.StatusBadRequest, "The title must be 1-500 characters and not start with --.")
+	}
+	result, err := models.cached()
+	if err != nil {
+		return nil, err
+	}
+	project := ""
+	headings, _ := result.model["headings"].([]map[string]any)
+	for _, heading := range headings {
+		if asString(heading, "uuid") == uuid {
+			project = asString(heading, "project")
+		}
+	}
+	if project == "" || !token.allowed(result.model)[project] {
+		return nil, mcpFail(http.StatusForbidden, "This token may not access that heading; see the headings in list_todos.")
+	}
+	if _, err := withWriteRetry(func() ([]byte, error) { return runCLIOutput("edit", uuid, "--title", title) }); err != nil {
+		return nil, err
+	}
+	models.wrote(withCollectionItem("headings", uuid, "headingTitle", &title, nil))
+	return map[string]any{"updated": true, "heading": map[string]any{"uuid": uuid, "title": title}}, nil
 }
 
 // createTodo serves create_todo: a to-do in an allowed project, optionally
@@ -974,13 +1095,27 @@ func mcpWriteToolDefinitions() []map[string]any {
 			"inputSchema": object(map[string]any{"uuid": str("Project UUID from list_projects."), "title": str("New title."), "note": str("New notes (replace the existing ones).")}, "uuid"),
 		},
 		{
+			"name":        "create_heading",
+			"description": "Creates a heading at the end of a project this token may access, like Things. Optional todos: to-do UUIDs of that project to file under the new heading (to file more later, use update_todo with heading).",
+			"inputSchema": object(map[string]any{
+				"project": str("Project UUID from list_projects."),
+				"title":   str("Heading title, 1-500 characters."),
+				"todos":   strings("To-do UUIDs of the project to move under the heading, up to 50."),
+			}, "project", "title"),
+		},
+		{
+			"name":        "update_heading",
+			"description": "Renames a heading of a project this token may access.",
+			"inputSchema": object(map[string]any{"uuid": str("Heading UUID from list_todos."), "title": str("New title, 1-500 characters.")}, "uuid", "title"),
+		},
+		{
 			"name":        "complete_todo",
 			"description": "Marks one to-do as completed, like ticking it off in Things. The to-do must belong to a project this token may access. Already completed to-dos are left as they are.",
 			"inputSchema": object(map[string]any{"uuid": str("To-do UUID from list_todos.")}, "uuid"),
 		},
 		{
 			"name":        "create_todo",
-			"description": "Creates a to-do in a project this token may access, at the bottom of the project (or top). Optional: note, heading (UUID from list_todos), tags (titles; unknown ones need create_missing_tags), when, deadline, checklist (subtask titles in order).",
+			"description": "Creates a to-do in a project this token may access, at the bottom of the project (or top). Optional: note, heading (UUID from list_todos or create_heading), tags (titles; unknown ones need create_missing_tags), when, deadline, checklist (subtask titles in order).",
 			"inputSchema": object(map[string]any{
 				"project":             str("Project UUID from list_projects."),
 				"title":               str("Title, 1-500 characters."),

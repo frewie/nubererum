@@ -75,6 +75,10 @@
             <span class="nav-icon" data-icon="tag"></span>
             <span>Tags</span>
           </button>
+          <button class="settings-link" id="mcp-button" type="button" hidden>
+            <span class="nav-icon" data-icon="plug"></span>
+            <span>MCP Tokens</span>
+          </button>
           <button class="settings-link" id="shortcuts-button" type="button" title="Keyboard shortcuts (?)">
             <span class="nav-icon" data-icon="keyboard"></span>
             <span>Shortcuts</span>
@@ -246,6 +250,42 @@
         <h2>Tags</h2>
         <p class="dialog-hint">Rename a tag by editing its name; deleting it removes it from every to-do and project.</p>
         <ul id="tags-list" class="tags-list"></ul>
+        <div class="dialog-actions">
+          <button class="primary-button" type="submit" value="done">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="mcp-dialog" class="new-project wide">
+      <form method="dialog">
+        <h2>MCP Tokens</h2>
+        <p class="dialog-hint">A token lets an AI agent work on the projects it covers over MCP at <code id="mcp-endpoint"></code>. A tag covers every project and area that carries it in Things.</p>
+        <ul id="mcp-list" class="tags-list mcp-list"></ul>
+        <section class="mcp-section" id="mcp-created" hidden>
+          <h3>Token “<span id="mcp-created-name"></span>” created</h3>
+          <p class="dialog-hint">Copy it now: it is shown only once.</p>
+          <div class="mcp-secret">
+            <input id="mcp-secret" readonly aria-label="New token" />
+            <button class="secondary-button" type="button" id="mcp-copy">Copy</button>
+          </div>
+          <p class="dialog-hint">Claude Code, with the token in <code>THINGS_MCP_TOKEN</code>:</p>
+          <pre id="mcp-command" class="mcp-command"></pre>
+        </section>
+        <section class="mcp-section" id="mcp-new">
+          <h3>New Token</h3>
+          <label>Name <input name="mcpName" maxlength="64" placeholder="e.g. laptop" autocomplete="off" spellcheck="false" /></label>
+          <fieldset>
+            <legend>Tags</legend>
+            <div id="mcp-tags" class="mcp-choices"></div>
+          </fieldset>
+          <fieldset>
+            <legend>Projects</legend>
+            <div id="mcp-projects" class="mcp-choices"></div>
+          </fieldset>
+          <label class="mcp-check"><input type="checkbox" name="mcpReadOnly" /> Read-only: the agent can only list projects and to-dos</label>
+          <p class="mcp-error" id="mcp-error" role="alert" hidden></p>
+          <button class="secondary-button" type="button" id="mcp-create">Create Token</button>
+        </section>
         <div class="dialog-actions">
           <button class="primary-button" type="submit" value="done">Done</button>
         </div>

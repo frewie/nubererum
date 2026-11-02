@@ -85,6 +85,7 @@ fi
 		edited := map[string]map[string]string{}
 		created := []map[string]any{}
 		createdProjects := []map[string]any{}
+		headings := []map[string]any{{"uuid": mcpHeadingA, "title": "Phase 2", "project": mcpProjectA, "index": 0}}
 		// A1's checklist, with the fake CLI's checklist writes replayed.
 		checklistA1 := []map[string]any{{"uuid": mcpItemA, "title": "Unit", "done": true, "index": 0}, {"uuid": mcpItemB, "title": "E2E", "done": false, "index": 1}}
 		findItem := func(uuid string) int {
@@ -129,7 +130,9 @@ fi
 					case op["cmd"] == "checklist-reorder" && at >= 0:
 						checklistA1[at]["index"] = int(asNumber(op, "index"))
 					}
-					if op["cmd"] == "create" && op["type"] == "project" {
+					if op["cmd"] == "create" && op["type"] == "heading" {
+						headings = append(headings, map[string]any{"uuid": mcpNewUUID1, "title": op["title"], "project": asString(op, "project"), "index": 0})
+					} else if op["cmd"] == "create" && op["type"] == "project" {
 						createdProjects = append(createdProjects, map[string]any{"uuid": mcpNewUUID1, "title": op["title"], "when": asString(op, "when"), "count": 0, "tags": []string{}, "area": asString(op, "area")})
 					} else if op["cmd"] == "create" {
 						// The fake CLI reports mcpNewUUID1 for the first result.
@@ -158,10 +161,15 @@ fi
 				task[field] = value
 			}
 		}
+		for _, heading := range headings {
+			if title, ok := edited[asString(heading, "uuid")]["title"]; ok {
+				heading["title"] = title
+			}
+		}
 		return map[string]any{
 			"tasks":    tasks,
 			"lists":    map[string][]map[string]any{"anytime": tasks},
-			"headings": []map[string]any{{"uuid": mcpHeadingA, "title": "Phase 2", "project": mcpProjectA, "index": 0}},
+			"headings": headings,
 			"tags":     []map[string]any{{"uuid": mcpTagCode, "title": "code", "index": 0}, {"uuid": "TagHomeeeeeeeeeeeeeeeee", "title": "Home", "index": 1}, {"uuid": mcpTagHash, "title": "#coding", "index": 2}},
 			"projects": append([]map[string]any{
 				{"uuid": mcpProjectA, "title": "Alpha", "when": "anytime", "count": 2, "tags": []string{}, "area": mcpAreaHome},
@@ -525,7 +533,7 @@ func TestMCPInitializeAndToolList(t *testing.T) {
 		}
 		return result
 	}
-	if got := strings.Join(names(token), ","); got != "list_areas,list_tags,list_projects,list_todos,create_project,update_project,complete_todo,create_todo,update_todo,reorder_todo,add_checklist_items,update_checklist_item,remove_checklist_item,reorder_checklist" {
+	if got := strings.Join(names(token), ","); got != "list_areas,list_tags,list_projects,list_todos,create_project,update_project,create_heading,update_heading,complete_todo,create_todo,update_todo,reorder_todo,add_checklist_items,update_checklist_item,remove_checklist_item,reorder_checklist" {
 		t.Fatalf("tools = %s", got)
 	}
 	if got := strings.Join(names(readOnly), ","); got != "list_areas,list_tags,list_projects,list_todos" {
@@ -1159,7 +1167,7 @@ func TestMCPTaggedAreaAllowsProjects(t *testing.T) {
 func TestMCPWriteToolsRefusedForReadOnly(t *testing.T) {
 	h := newMCPTestServer(t)
 	viewer := h.createToken("viewer", true, mcpProjectA)
-	for _, name := range []string{"create_project", "update_project", "create_todo", "update_todo", "reorder_todo", "add_checklist_items", "update_checklist_item", "remove_checklist_item", "reorder_checklist"} {
+	for _, name := range []string{"create_project", "update_project", "create_heading", "update_heading", "create_todo", "update_todo", "reorder_todo", "add_checklist_items", "update_checklist_item", "remove_checklist_item", "reorder_checklist"} {
 		if status, _, message := h.tool(viewer, name, map[string]any{"project": mcpProjectA, "uuid": mcpTaskA1, "todo": mcpTaskA1, "title": "x"}); status != http.StatusForbidden || message != "This token is read-only." {
 			t.Fatalf("%s with a read-only token = %d %q", name, status, message)
 		}
@@ -1198,5 +1206,60 @@ func TestMCPBatchRoundsSplitWritesPerItem(t *testing.T) {
 	var failure mcpError
 	if !errors.As(err, &failure) || failure.status != http.StatusBadGateway || failure.message != "Things Cloud write failed: boom. Not written: deadline; already written: tags, checklist-add, reorder; skipped: reorder" {
 		t.Fatalf("failure = %v", err)
+	}
+}
+
+func TestMCPHeadings(t *testing.T) {
+	h := newMCPTestServer(t)
+	token := h.createToken("laptop", false, mcpProjectA)
+
+	if status, _, _ := h.tool(token, "create_heading", map[string]any{"project": mcpProjectB, "title": "Nope"}); status != http.StatusForbidden {
+		t.Fatalf("create_heading(B) = %d, want 403", status)
+	}
+	if status, _, _ := h.tool(token, "create_heading", map[string]any{"project": mcpProjectA, "title": "--oops"}); status != http.StatusBadRequest {
+		t.Fatalf("create_heading(option title) = %d, want 400", status)
+	}
+	if status, _, _ := h.tool(token, "create_heading", map[string]any{"project": mcpProjectA, "title": "Later", "todos": []string{mcpTaskB1}}); status != http.StatusBadRequest {
+		t.Fatalf("create_heading(to-do of B) = %d, want 400", status)
+	}
+	if h.calls() != "" {
+		t.Fatalf("CLI called for refused requests: %s", h.calls())
+	}
+
+	status, result, message := h.tool(token, "create_heading", map[string]any{"project": mcpProjectA, "title": " Phase 3 ", "todos": []string{mcpTaskA1, mcpTaskA1}})
+	if status != http.StatusOK || result["created"] != true {
+		t.Fatalf("create_heading = %d %v %q", status, result, message)
+	}
+	heading := result["heading"].(map[string]any)
+	if heading["uuid"] != mcpNewUUID1 || heading["title"] != "Phase 3" || heading["index"] != float64(reorderStep) {
+		t.Fatalf("heading = %v", heading)
+	}
+	// The create, then the move to the end and the to-do in one batch.
+	if ops := h.batchOps(0); len(ops) != 1 || ops[0]["cmd"] != "create" || ops[0]["type"] != "heading" || ops[0]["project"] != mcpProjectA || ops[0]["title"] != "Phase 3" {
+		t.Fatalf("create ops = %v", ops)
+	}
+	ops := h.batchOps(1)
+	if len(ops) != 2 || ops[0]["cmd"] != "reorder" || ops[0]["uuid"] != mcpNewUUID1 || ops[0]["index"] != float64(reorderStep) ||
+		ops[1]["cmd"] != "move" || ops[1]["uuid"] != mcpTaskA1 || ops[1]["heading"] != mcpNewUUID1 {
+		t.Fatalf("placement ops = %v", ops)
+	}
+	_, listed, _ := h.tool(token, "list_todos", map[string]any{"project": mcpProjectA})
+	if headings, _ := listed["headings"].([]any); len(headings) != 2 || headings[1].(map[string]any)["title"] != "Phase 3" {
+		t.Fatalf("list_todos headings = %v", listed["headings"])
+	}
+
+	if status, _, _ := h.tool(token, "update_heading", map[string]any{"uuid": mcpNewUUID2, "title": "x"}); status != http.StatusForbidden {
+		t.Fatalf("update_heading(unknown) = %d, want 403", status)
+	}
+	status, result, message = h.tool(token, "update_heading", map[string]any{"uuid": mcpHeadingA, "title": "Ship it"})
+	if status != http.StatusOK || result["updated"] != true {
+		t.Fatalf("update_heading = %d %v %q", status, result, message)
+	}
+	if !strings.Contains(h.calls(), "edit|"+mcpHeadingA+"|--title|Ship it|") {
+		t.Fatalf("edit call missing: %s", h.calls())
+	}
+	_, listed, _ = h.tool(token, "list_todos", map[string]any{"project": mcpProjectA})
+	if headings, _ := listed["headings"].([]any); headings[0].(map[string]any)["title"] != "Ship it" {
+		t.Fatalf("renamed heading = %v", listed["headings"])
 	}
 }

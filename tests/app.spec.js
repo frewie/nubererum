@@ -1852,3 +1852,69 @@ test.describe("shortcuts after Things", () => {
     await expect(sheet).toBeVisible();
   });
 });
+
+test("MCP Tokens lists, creates and removes tokens; the value is shown once", async ({ page }) => {
+  const data = model([], {
+    tags: [{ uuid: "t-code", title: "Coding" }],
+    areas: [{ uuid: "a-work", title: "Work", type: "area" }],
+    projects: [
+      { uuid: "p-app", title: "App", area: "a-work", when: "anytime", status: "open" },
+      { uuid: "p-done", title: "Done project", area: "", when: "anytime", status: "completed" },
+    ],
+  });
+  let tokens = [
+    { name: "laptop", readOnly: true, tags: ["Coding"], projects: [], covers: [{ uuid: "p-app", title: "App" }], areas: [], createdAt: "2026-11-01T10:00:00Z" },
+  ];
+  const created = [];
+  await mockApp(page, {
+    "GET /api/status": signedIn,
+    "GET /api/sync": (route) => route.fulfill({ json: data }),
+    "GET /api/mcp-tokens": (route) => route.fulfill({ json: { tokens, path: "/mcp" } }),
+    "POST /api/mcp-token-create": (route, request) => {
+      const body = request.postDataJSON();
+      created.push(body);
+      const token = { name: body.name, readOnly: body.readOnly, tags: body.tags, projects: body.projects.map((uuid) => ({ uuid, title: "App", open: true })), covers: [{ uuid: "p-app", title: "App" }], areas: [], createdAt: "2026-11-02T10:00:00Z" };
+      tokens = [...tokens, token];
+      return route.fulfill({ json: { token: "tca_secretvalue", created: token, path: "/mcp" } });
+    },
+    "POST /api/mcp-token-remove": (route, request) => {
+      tokens = tokens.filter((token) => token.name !== request.postDataJSON().name);
+      return route.fulfill({ json: { removed: request.postDataJSON().name } });
+    },
+  });
+  await page.goto("/");
+  await page.locator("#mcp-button").click();
+  const dialog = page.locator("#mcp-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("#mcp-endpoint")).toHaveText(/\/mcp$/);
+  await expect(dialog.locator(".mcp-row")).toHaveCount(1);
+  await expect(dialog.locator(".mcp-row")).toContainText("Read-only");
+  await expect(dialog.locator(".mcp-row")).toContainText("#Coding");
+  // Only open projects can be chosen.
+  await expect(dialog.locator("#mcp-projects label")).toHaveText(["App Work"]);
+
+  await dialog.locator("#mcp-create").click();
+  await expect(dialog.locator("#mcp-error")).toContainText("name");
+  await dialog.locator("input[name=mcpName]").fill("agent");
+  await dialog.locator("#mcp-create").click();
+  await expect(dialog.locator("#mcp-error")).toContainText("at least one");
+  await dialog.locator("#mcp-projects input[value=p-app]").check();
+  await dialog.locator("input[name=mcpName]").press("Enter");
+  await expect(dialog.locator("#mcp-secret")).toHaveValue("tca_secretvalue");
+  await expect(dialog).toBeVisible();
+  expect(created).toEqual([{ name: "agent", tags: [], projects: ["p-app"], readOnly: false }]);
+  await expect(dialog.locator("#mcp-command")).toContainText(`${new URL(page.url()).origin}/mcp`);
+  await expect(dialog.locator(".mcp-row")).toHaveCount(2);
+  await expect(dialog.locator(".mcp-row").nth(1)).toContainText("Read & write");
+
+  page.once("dialog", (confirm) => confirm.accept());
+  await dialog.locator("[data-mcp-remove=laptop]").click();
+  await expect(dialog.locator(".mcp-row")).toHaveCount(1);
+  await expect(dialog.locator(".mcp-row")).toContainText("agent");
+
+  // Opening it again does not show the old value.
+  await dialog.locator("button[value=done]").click();
+  await page.locator("#mcp-button").click();
+  await expect(page.locator("#mcp-created")).toBeHidden();
+  await expect(page.locator("#mcp-secret")).toHaveValue("");
+});

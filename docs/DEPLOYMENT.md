@@ -175,7 +175,9 @@ docker rm -f things-passkey-test
 
 ## MCP Tokens for Coding Agents
 
-`POST /mcp` lets Claude Code (or another MCP client) on another machine read, create, change, order and complete the to-dos of chosen projects, with tags, notes and checklists (subtasks), and create projects in tagged areas; nothing outside those projects and areas, no deleting (see [API — MCP endpoint](api.md#mcp-endpoint-mcp)). Passkeys cannot be used from a CLI, so the endpoint has its own tokens, managed on the server like passkeys. ```sh
+`POST /mcp` lets Claude Code (or another MCP client) on another machine read, create, change, order and complete the to-dos of chosen projects, with headings, tags, notes and checklists (subtasks), and create projects in tagged areas; nothing outside those projects and areas, no deleting (see [API — MCP endpoint](api.md#mcp-endpoint-mcp)). Passkeys cannot be used from a CLI, so the endpoint has its own tokens. Manage them in the web app under "MCP Tokens" in the sidebar (choose tags and/or projects, optionally read-only; the token is shown once with the Claude Code command), or on the server:
+
+```sh
 docker exec nubererum nubererum mcp-token-projects   # open projects with their UUIDs and tags
 docker exec nubererum nubererum mcp-token-create --name laptop --tag Coding [--read-only]
 docker exec nubererum nubererum mcp-token-create --name repo-a --project <project uuid> [--project <uuid> ...]
@@ -183,7 +185,7 @@ docker exec nubererum nubererum mcp-token-list
 docker exec nubererum nubererum mcp-token-remove laptop
 ```
 
-A token's scope is given by `--tag` (every open project that carries the Things tag, and every project of an area that carries it; in such an area the token may also create projects), by `--project` UUIDs, or both. Tag a project or area in Things to add it, remove the tag to take it away. `mcp-token-create` prints the token once; it is stored only as a hash in `/data/mcp-tokens.json`. `--read-only` leaves out `complete_todo`. Removing a token refuses its next request. The usual setup is one token per machine scoped by a tag such as `Coding`, or one token per repository limited to that repository's project.
+A token's scope is given by `--tag` (every open project that carries the Things tag, and every project of an area that carries it; in such an area the token may also create projects), by `--project` UUIDs, or both. Tag a project or area in Things to add it, remove the tag to take it away. `mcp-token-create` prints the token once; it is stored only as a hash in `/data/mcp-tokens.json`. `--read-only` leaves out the write tools. Removing a token refuses its next request. The usual setup is one token per machine scoped by a tag such as `Coding`, or one token per repository limited to that repository's project.
 
 ### Client setup: Claude Code
 

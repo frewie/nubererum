@@ -67,6 +67,7 @@ const icons = {
   checklist: `<svg class="icon" viewBox="0 0 20 20"><path d="M3.5 5.5l1.5 1.5 2.5-3M3.5 13l1.5 1.5 2.5-3M10 5.5h6.5M10 13h6.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   bell: `<svg class="icon" viewBox="0 0 20 20"><path d="M5.5 14V9a4.5 4.5 0 0 1 9 0v5l1.5 1.5h-12z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.3 17.2a1.8 1.8 0 0 0 3.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   flag: `<svg class="icon" viewBox="0 0 20 20"><path d="M5 17V3.5M5 4h9l-2 3.5 2 3.5H5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  plug: `<svg class="icon" viewBox="0 0 20 20"><path d="M7 2.5v4M13 2.5v4M5 6.5h10v3a5 5 0 0 1-10 0z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M10 14.5v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   "theme-system": `<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg>`,
   "theme-light": `<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.5v1.8M10 15.7v1.8M2.5 10h1.8M15.7 10h1.8M4.7 4.7l1.3 1.3M14 14l1.3 1.3M4.7 15.3 6 14M14 6l1.3-1.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   "theme-dark": `<svg class="icon" viewBox="0 0 20 20"><path d="M15.8 12.6A6.6 6.6 0 0 1 7.4 4.2a6.7 6.7 0 1 0 8.4 8.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
@@ -115,6 +116,12 @@ const els = {
   repeatDialog: document.querySelector("#repeat-dialog"),
   tagsDialog: document.querySelector("#tags-dialog"),
   tagsButton: document.querySelector("#tags-button"),
+  mcpButton: document.querySelector("#mcp-button"),
+  mcpDialog: document.querySelector("#mcp-dialog"),
+  mcpList: document.querySelector("#mcp-list"),
+  mcpTags: document.querySelector("#mcp-tags"),
+  mcpProjects: document.querySelector("#mcp-projects"),
+  mcpCreated: document.querySelector("#mcp-created"),
   projectNote: document.querySelector("#project-note"),
   newProject: document.querySelector("#new-project"),
   newProjectButton: document.querySelector("#new-project-button"),
@@ -1111,6 +1118,7 @@ function render() {
   els.newProjectButton.hidden = state.phase !== "ready";
   els.newAreaButton.hidden = state.phase !== "ready";
   els.tagsButton.hidden = state.phase !== "ready";
+  els.mcpButton.hidden = state.phase !== "ready";
   els.emptySignin.classList.toggle("visible", state.phase === "signedOut");
   renderCounts();
   renderQuickAdd();
@@ -2151,6 +2159,132 @@ function undoRepeat(task, template) {
     .catch((error) => toast(`Could not undo: ${error.message}`, "error"));
 }
 
+// MCP tokens: agents use them on /mcp (mcp.go). The dialog lists, creates
+// and removes them (mcpadmin.go); a new token's value is shown once.
+function openMcpTokens() {
+  const form = els.mcpDialog.querySelector("form");
+  form.elements.mcpName.value = "";
+  form.elements.mcpReadOnly.checked = false;
+  els.mcpCreated.hidden = true;
+  document.querySelector("#mcp-secret").value = "";
+  showMcpError("");
+  renderMcpChoices();
+  els.mcpDialog.showModal();
+  loadMcpTokens();
+}
+
+function showMcpError(message) {
+  const error = document.querySelector("#mcp-error");
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+// renderMcpChoices offers the tags and the open projects to scope a token.
+function renderMcpChoices() {
+  const choice = (value, label, detail = "") =>
+    `<label><input type="checkbox" value="${escapeHtml(value)}" /> <span>${escapeHtml(label)}</span>${detail ? ` <span class="mcp-detail">${escapeHtml(detail)}</span>` : ""}</label>`;
+  const byTitle = (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+  const tags = [...(state.model?.tags || [])].sort(byTitle);
+  els.mcpTags.innerHTML = tags.length ? tags.map((tag) => choice(tag.title, tag.title)).join("") : `<p class="dialog-hint">No tags yet.</p>`;
+  const areas = new Map((state.model?.areas || []).map((area) => [area.uuid, area.title]));
+  const projects = (state.model?.projects || []).filter((project) => (project.status || "open") === "open" && !isTemp(project.uuid)).sort(byTitle);
+  els.mcpProjects.innerHTML = projects.length ? projects.map((project) => choice(project.uuid, project.title, areas.get(project.area) || "")).join("") : `<p class="dialog-hint">No open projects.</p>`;
+}
+
+async function loadMcpTokens() {
+  try {
+    const data = await api("/api/mcp-tokens");
+    document.querySelector("#mcp-endpoint").textContent = location.origin + data.path;
+    renderMcpTokens(data.tokens || []);
+  } catch (error) {
+    els.mcpList.innerHTML = `<li class="empty">Could not load the tokens: ${escapeHtml(error.message)}</li>`;
+  }
+}
+
+function renderMcpTokens(tokens) {
+  const when = (value) => (value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "never");
+  els.mcpList.innerHTML = tokens.length
+    ? tokens
+        .map((token) => {
+          const scope = [
+            ...token.tags.map((tag) => `#${tag}`),
+            ...token.projects.map((project) => (project.open ? project.title : "a closed or unknown project")),
+          ];
+          const covers = token.covers.map((project) => project.title);
+          const areas = token.areas.length ? ` New projects in ${token.areas.map((area) => area.title).join(", ")}.` : "";
+          return `<li class="mcp-row">
+            <div class="mcp-row-main">
+              <div><strong>${escapeHtml(token.name)}</strong> <span class="mcp-access">${token.readOnly ? "Read-only" : "Read & write"}</span></div>
+              <div class="mcp-detail">Scope: ${escapeHtml(scope.join(", "))}</div>
+              <div class="mcp-detail">${covers.length ? `Covers ${escapeHtml(covers.join(", "))}.` : "Covers no open project yet."}${escapeHtml(areas)}</div>
+              <div class="mcp-detail">Created ${escapeHtml(when(token.createdAt))} · last used ${escapeHtml(when(token.lastUsedAt))}</div>
+            </div>
+            <button type="button" class="secondary-button" data-mcp-remove="${escapeHtml(token.name)}" aria-label="Remove ${escapeHtml(token.name)}">Remove</button>
+          </li>`;
+        })
+        .join("")
+    : `<li class="empty">No tokens yet.</li>`;
+}
+
+async function createMcpToken() {
+  const form = els.mcpDialog.querySelector("form");
+  const name = form.elements.mcpName.value.trim();
+  const checked = (root) => [...root.querySelectorAll("input:checked")].map((input) => input.value);
+  const body = { name, tags: checked(els.mcpTags), projects: checked(els.mcpProjects), readOnly: form.elements.mcpReadOnly.checked };
+  if (!name) {
+    showMcpError("Give the token a name, e.g. the machine the agent runs on.");
+    form.elements.mcpName.focus();
+    return;
+  }
+  if (!body.tags.length && !body.projects.length) {
+    showMcpError("Choose at least one tag or project.");
+    return;
+  }
+  const button = document.querySelector("#mcp-create");
+  button.disabled = true;
+  showMcpError("");
+  try {
+    const data = await api("/api/mcp-token-create", { method: "POST", body: JSON.stringify(body) });
+    document.querySelector("#mcp-created-name").textContent = data.created.name;
+    document.querySelector("#mcp-secret").value = data.token;
+    document.querySelector("#mcp-command").textContent = `claude mcp add --transport http things ${location.origin}${data.path} --header "Authorization: Bearer \${THINGS_MCP_TOKEN}"`;
+    els.mcpCreated.hidden = false;
+    form.elements.mcpName.value = "";
+    form.elements.mcpReadOnly.checked = false;
+    for (const input of els.mcpDialog.querySelectorAll(".mcp-choices input:checked")) input.checked = false;
+    els.mcpCreated.scrollIntoView({ block: "nearest" });
+    document.querySelector("#mcp-secret").select();
+    await loadMcpTokens();
+  } catch (error) {
+    showMcpError(`Could not create the token: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copyMcpToken() {
+  const secret = document.querySelector("#mcp-secret");
+  const button = document.querySelector("#mcp-copy");
+  try {
+    await navigator.clipboard.writeText(secret.value);
+    button.textContent = "Copied";
+  } catch {
+    secret.select();
+    button.textContent = "Press Ctrl+C";
+  }
+  setTimeout(() => (button.textContent = "Copy"), 2000);
+}
+
+async function removeMcpToken(name) {
+  if (!window.confirm(`Remove the token “${name}”? Agents using it lose access at once.`)) return;
+  try {
+    await api("/api/mcp-token-remove", { method: "POST", body: JSON.stringify({ name }) });
+  } catch (error) {
+    showMcpError(`Could not remove “${name}”: ${error.message}`);
+  }
+  loadMcpTokens();
+}
+
 // openTags lists the tags to rename or delete them, like Things' tag window.
 function openTags() {
   renderTagsList();
@@ -3189,6 +3323,20 @@ async function init() {
   els.newProjectButton.addEventListener("click", openNewProject);
   els.newAreaButton.addEventListener("click", newArea);
   els.tagsButton.addEventListener("click", openTags);
+  els.mcpButton.addEventListener("click", openMcpTokens);
+  document.querySelector("#mcp-create").addEventListener("click", createMcpToken);
+  document.querySelector("#mcp-copy").addEventListener("click", copyMcpToken);
+  els.mcpList.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-mcp-remove]");
+    if (remove) removeMcpToken(remove.dataset.mcpRemove);
+  });
+  els.mcpDialog.querySelector("input[name=mcpName]").addEventListener("keydown", (event) => {
+    // Enter creates the token instead of closing the dialog.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      createMcpToken();
+    }
+  });
   els.tagsDialog.addEventListener("click", (event) => {
     const remove = event.target.closest("[data-tag-delete]");
     if (remove) deleteTag(remove.dataset.tagDelete);

@@ -28,7 +28,7 @@ Cultured Code does not publish a Things Cloud API. The app therefore uses the re
 - Notes with clickable web links and a Markdown preview. Search, including the Logbook (grouped by month).
 - Web app manifest and icons, so the app can be added to a home screen.
 - Docker Compose deployment. Basic Auth for local and LAN use, passkeys (WebAuthn) for internet access.
-- An MCP endpoint (`/mcp`) with project-bound tokens (by Things tag or UUID), so Claude Code can read, create, change, order and complete the to-dos of a project, with tags, notes and checklists, and create projects in a tagged area.
+- An MCP endpoint (`/mcp`) with project-bound tokens (by Things tag or UUID), managed in the web app,, so Claude Code can read, create, change, order and complete the to-dos of a project, with headings, tags, notes and checklists, and create projects in a tagged area.
 
 ## Quick Start With Docker Compose
 
