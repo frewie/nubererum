@@ -180,9 +180,21 @@ func readOffline(args ...string) ([]map[string]any, error) {
 	return parseCLIRows(out)
 }
 
-// moveInBackground runs the reorder that follows a create. The cached model
-// already shows the new position; a sync follows the write.
+// backgroundMoves counts the running moveInBackground writes, so tests can
+// wait for them before they restore the model cache.
+var backgroundMoves sync.WaitGroup
+
+// moveInBackground runs the reorder that follows a create, after the answer.
+// The cached model already shows the new position; a sync follows the write.
 func moveInBackground(input []byte, failure, uuid string) {
+	backgroundMoves.Add(1)
+	go func() {
+		defer backgroundMoves.Done()
+		moveNow(input, failure, uuid)
+	}()
+}
+
+func moveNow(input []byte, failure, uuid string) {
 	if _, err := runCLIBatch(input); err != nil {
 		logError(failure, err, "uuid", uuid)
 		return
@@ -1463,7 +1475,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			models.wrote(withNewTask(task))
 			if moveInput != nil {
-				go moveInBackground(moveInput, "create: moving the new to-do to the top failed", created.UUID)
+				moveInBackground(moveInput, "create: moving the new to-do to the top failed", created.UUID)
 			}
 		} else if kind == "heading" && created.UUID != "" {
 			project := strings.TrimSpace(body.Project)
@@ -1476,7 +1488,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 			models.wrote(withNewHeading(heading))
 			if ok {
 				move, _ := json.Marshal([]map[string]any{{"cmd": "reorder", "uuid": created.UUID, "index": index}})
-				go moveInBackground(move, "create: moving the new heading to the end failed", created.UUID)
+				moveInBackground(move, "create: moving the new heading to the end failed", created.UUID)
 			}
 		} else {
 			models.wrote(nil)

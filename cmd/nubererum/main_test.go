@@ -565,6 +565,7 @@ func TestCreatePassesTypeAndStartDate(t *testing.T) {
 	session = sessionState{Email: "user@example.com", Password: "secret"}
 	sessionMu.Unlock()
 	t.Cleanup(func() {
+		backgroundMoves.Wait()
 		models = previousModels
 		sessionMu.Lock()
 		session = previousSession
