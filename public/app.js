@@ -353,8 +353,50 @@ function activeTagFilter() {
   return state.tagFilter?.list === listKey() ? state.tagFilter.uuid : "";
 }
 
-// listTasks returns the to-dos of the list on screen, filtered by the search
-// and, unless withoutTagFilter, by the tag filter.
+// areaFilterViews are the lists that can be narrowed to one area. The choice
+// is remembered per list and per browser, so Today stays on Work after a look
+// at another list or a reload.
+const areaFilterViews = ["today", "upcoming", "anytime", "someday"];
+const areaFilterKey = "things-area-filter";
+const areaFilters = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(areaFilterKey));
+    const filters = {};
+    for (const view of areaFilterViews) if (typeof saved?.[view] === "string") filters[view] = saved[view];
+    return filters;
+  } catch {
+    return {};
+  }
+})();
+
+// taskAreaID is the area a to-do or project belongs to, directly or through
+// its project.
+function taskAreaID(item) {
+  return item.area || (item.project ? findScopeItem("project", item.project)?.area : "") || "";
+}
+
+// activeAreaFilter is the area the list on screen is narrowed to, or "". A
+// remembered area that no longer exists filters nothing.
+function activeAreaFilter() {
+  if (state.scope || !areaFilterViews.includes(state.view)) return "";
+  const uuid = areaFilters[state.view] || "";
+  return uuid && findScopeItem("area", uuid) ? uuid : "";
+}
+
+function toggleAreaFilter(uuid) {
+  if (!uuid || activeAreaFilter() === uuid) delete areaFilters[state.view];
+  else areaFilters[state.view] = uuid;
+  try {
+    localStorage.setItem(areaFilterKey, JSON.stringify(areaFilters));
+  } catch {
+    // Storage is optional.
+  }
+  state.tagFilter = null;
+  render();
+}
+
+// listTasks returns the to-dos of the list on screen, filtered by the search,
+// the area filter and, unless withoutTagFilter, the tag filter.
 function listTasks(withoutTagFilter = false) {
   if (!state.model) return [];
   let base = state.model.lists[state.view] || [];
@@ -371,6 +413,8 @@ function listTasks(withoutTagFilter = false) {
     const open = findTask(state.editing);
     if (open) base = [open, ...base];
   }
+  const area = activeAreaFilter();
+  if (area) base = base.filter((task) => taskAreaID(task) === area || task.uuid === state.editing);
   const tag = withoutTagFilter ? "" : activeTagFilter();
   if (tag) base = base.filter((task) => inheritedTagIDs(task).includes(tag) || task.uuid === state.editing);
   const query = state.query.trim().toLowerCase();
@@ -579,9 +623,12 @@ function renderSidebar() {
 }
 
 // listProjects are the projects Someday and Upcoming list above their to-dos.
-function listProjects() {
+function listProjects(withoutAreaFilter = false) {
   if (state.scope || !["someday", "upcoming"].includes(state.view)) return [];
-  return liveProjects().filter((project) => project.when === state.view).sort(byIndex);
+  const area = withoutAreaFilter ? "" : activeAreaFilter();
+  return liveProjects()
+    .filter((project) => project.when === state.view && (!area || taskAreaID(project) === area))
+    .sort(byIndex);
 }
 
 // inheritedTagIDs are the tags of a to-do or project together with those of
@@ -594,6 +641,22 @@ function inheritedTagIDs(item) {
     ...(project?.tagIDs || []),
     ...[...areas].flatMap((area) => findScopeItem("area", area)?.tagIDs || []),
   ];
+}
+
+// areaFilterBar shows the areas of the list's to-dos (Today, Upcoming,
+// Anytime, Someday): a click narrows the list to that area and its projects,
+// another click shows all again.
+function areaFilterBar() {
+  if (state.scope || !areaFilterViews.includes(state.view) || !state.model) return "";
+  const active = activeAreaFilter();
+  let base = [...pendingTasks(), ...visible(state.model.lists[state.view] || [])];
+  if (state.view === "someday" || state.view === "upcoming") base = [...base, ...listProjects(true)];
+  const used = new Set(base.map(taskAreaID).filter(Boolean));
+  const areas = (state.model.areas || []).filter((area) => used.has(area.uuid) || area.uuid === active).sort(byIndex);
+  if (!areas.length || (areas.length === 1 && !active)) return "";
+  const pill = (uuid, title) =>
+    `<button type="button" class="pill area-filter-pill${uuid === active ? " active" : ""}" data-area-filter="${escapeHtml(uuid)}" aria-pressed="${uuid === active}">${escapeHtml(title)}</button>`;
+  return `<div class="area-filter" role="group" aria-label="Filter by area">${pill("", "All")}${areas.map((area) => pill(area.uuid, area.title)).join("")}</div>`;
 }
 
 // tagFilterBar shows the tags used in the list, like the tag bar in Things:
@@ -1054,7 +1117,7 @@ function renderTasks() {
 
   els.summary.textContent = tasks.length === 1 ? "1 to-do" : `${tasks.length} to-dos`;
 
-  const projectsHtml = tagFilterBar(listTasks(true)) + projectRows();
+  const projectsHtml = areaFilterBar() + tagFilterBar(listTasks(true)) + projectRows();
   const projectScope = state.scope?.type === "project";
   els.newHeading.hidden = !projectScope;
   els.deleteProject.hidden = !projectScope;
@@ -1095,11 +1158,15 @@ function quickAddContext() {
   if (state.scope?.type === "area") {
     return { placeholder: `New To-Do in ${state.scope.title}`, payload: { when: "anytime", area: state.scope.id }, views: ["anytime"] };
   }
+  // With an area filter, new to-dos go to that area, so they stay in view.
+  const area = activeAreaFilter() ? findScopeItem("area", activeAreaFilter()) : null;
+  const placeholder = area ? `New To-Do in ${area.title}` : "New To-Do";
+  const inArea = area ? { area: area.uuid } : {};
   if (state.view === "upcoming") {
-    return { placeholder: "New To-Do", payload: {}, views: ["upcoming"], dated: true };
+    return { placeholder, payload: { ...inArea }, views: ["upcoming"], dated: true };
   }
   const views = state.view === "today" ? ["today", "anytime"] : [state.view];
-  return { placeholder: "New To-Do", payload: { when: state.view }, views };
+  return { placeholder, payload: { when: state.view, ...inArea }, views };
 }
 
 function renderQuickAdd() {
@@ -3077,6 +3144,11 @@ async function init() {
     }
     if (event.target.closest("[data-archive-more]")) {
       loadArchive(state.view, Math.min((state.archive[state.view]?.limit || 300) + 300, 2000));
+      return;
+    }
+    const areaFilter = event.target.closest("[data-area-filter]");
+    if (areaFilter) {
+      toggleAreaFilter(areaFilter.dataset.areaFilter);
       return;
     }
     const tagFilter = event.target.closest("[data-tag-filter]");

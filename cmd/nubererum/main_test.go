@@ -582,7 +582,9 @@ func TestCreatePassesTypeAndStartDate(t *testing.T) {
 	if response := post(`{"type":"project","title":"Garden","area":"AreaUuid1234567890abcd"}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "NewUuid1234567890abcde") {
 		t.Fatalf("project = %d %s", response.Code, response.Body)
 	}
-	if response := post(`{"title":"Dentist","scheduled":"2026-11-03"}`); response.Code != http.StatusOK {
+	// A start date in the future: one that has passed puts the to-do in Today.
+	future := time.Now().AddDate(0, 0, 7).Format("2006-01-02")
+	if response := post(`{"title":"Dentist","scheduled":"` + future + `"}`); response.Code != http.StatusOK {
 		t.Fatalf("scheduled = %d %s", response.Code, response.Body)
 	}
 	response := post(`{"title":"Call mum","when":"today"}`)
@@ -618,7 +620,7 @@ func TestCreatePassesTypeAndStartDate(t *testing.T) {
 	// follow in the background.
 	want := []string{
 		`[{"area":"AreaUuid1234567890abcd","cmd":"create","title":"Garden","type":"project","when":"anytime"}]`,
-		`[{"cmd":"create","extra":{"scheduled":"2026-11-03"},"title":"Dentist"}]`,
+		`[{"cmd":"create","extra":{"scheduled":"` + future + `"},"title":"Dentist"}]`,
 		`[{"cmd":"create","title":"Call mum","when":"today"}]`,
 		`[{"cmd":"create","project":"ProjMoveggggggggggggggg","title":"Küche","type":"heading","when":"anytime"}]`,
 		`[{"cmd":"create","title":"Below","when":"anytime"}]`,
