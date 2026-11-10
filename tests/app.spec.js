@@ -2037,6 +2037,46 @@ test.describe("shortcuts after Things", () => {
     expect(created()).toHaveLength(5);
   });
 
+  test("Ctrl+S opens When: Today, a day in the calendar, typing a day, Clear", async ({ page }) => {
+    const calls = [];
+    const iso = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const inDays = (days) => {
+      const date = new Date();
+      date.setDate(date.getDate() + days);
+      return iso(date);
+    };
+    await setup(page, calls, [task("a", "Alpha"), task("b", "Beta", ["anytime"])]);
+    const schedules = () => calls.filter((call) => call.path === "/api/schedule").map((call) => call.body);
+    const when = page.locator(".when-palette");
+
+    await page.locator(".task-row", { hasText: "Alpha" }).click();
+    await page.keyboard.press("Control+s");
+    await expect(when).toBeVisible();
+    await expect(when.locator(".palette-item", { hasText: "Today" })).toContainText("✓");
+    // Seven days from now is in the calendar.
+    await when.locator(`[data-day="${inDays(7)}"]`).click();
+    await expect.poll(schedules).toEqual([{ uuids: ["a"], startDate: inDays(7) }]);
+    await expect(when).toBeHidden();
+
+    await page.locator(".nav-item", { hasText: "Anytime" }).click();
+    await page.locator(".task-row", { hasText: "Beta" }).click();
+    await page.keyboard.press("Control+s");
+    await page.keyboard.type("tom");
+    await expect(when.locator(".palette-item")).toHaveText([/Tomorrow/]);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => schedules()[1]).toEqual({ uuids: ["b"], startDate: inDays(1) });
+
+    await page.locator(".task-row", { hasText: "Alpha" }).click();
+    await page.keyboard.press("Control+s");
+    await page.keyboard.type("in 2 weeks");
+    await expect(when.locator(".palette-item")).toHaveText([/In 2 weeks/]);
+    await page.keyboard.press("Escape");
+    await expect(when).toBeHidden();
+    await page.keyboard.press("Control+s");
+    await when.locator(".palette-item", { hasText: "Clear" }).click();
+    await expect.poll(() => schedules()[2]).toEqual({ uuids: ["a"], when: "anytime" });
+  });
+
   test("the cheat sheet lists the shortcuts", async ({ page }) => {
     const calls = [];
     await setup(page, calls, [task("a", "Alpha", ["anytime"])]);

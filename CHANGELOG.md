@@ -6,6 +6,7 @@ All notable changes to NubeRerum. The format follows [Keep a Changelog](https://
 
 ### Features
 
+- **When… (Ctrl/Cmd+S):** as in Things, a popover with Today, This Evening, a calendar of the next four weeks (› for later ones), Someday and Clear, for the selected to-dos or the open one. Typing finds a day: "tom"/"morgen", "fri", "next week", "in 3 days", "in 2 weeks", "20", "nov 20", "20.11.". A to-do with a start date waits in Upcoming and comes back to Today on that day, e.g. to put it on hold until tomorrow or next week.
 - **Areas like in Things:** an area lists its own to-dos first, then its projects with to-dos, each folded to one compact line with its progress and open to-dos; a click opens it to its to-dos under their headings, "Open" goes to the project. Drag a project's line to reorder the projects (the sidebar shows the same order). A search or tag filter opens the projects with matches.
 - **Today by area:** with an area chosen, Today lists the area's own to-dos first without a heading, then its projects.
 - **Area filter:** Today, Upcoming, Anytime and Someday have an area bar ("All", then the areas of the list's to-dos). Choosing an area shows only its to-dos, including those in its projects; each list remembers its choice in the browser, also after a reload. New to-dos added while an area is chosen go to that area.
