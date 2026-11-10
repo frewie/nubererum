@@ -1793,8 +1793,35 @@ h1 .rename-input {
   color: var(--accent, #2b84e6);
 }
 
-.task-section.folded {
-  margin-bottom: 4px;
+/* Folded projects in an area sit close together, one line each. */
+.task-section.folded h2 {
+  margin: 0;
+  padding-bottom: 2px;
+  border-bottom: 0;
+}
+
+.task-section.folded .task-section-rows {
+  display: none;
+}
+
+.task-section.folded + .task-section.folded {
+  margin-top: -18px;
+}
+
+.task-section[data-fold-section] h2 {
+  cursor: grab;
+}
+
+.task-section.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.task-section.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.task-section.dragging {
+  opacity: 0.5;
 }
 
 .task-section.nested {

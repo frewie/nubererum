@@ -521,9 +521,9 @@ function toggleProjectFold(uuid) {
   renderTasks();
 }
 
-// areaSections follow Things' area view: the area's projects first, each a
-// folded row that opens to its to-dos by heading, then the area's own
-// to-dos. A search or tag filter shows only projects with matches, open.
+// areaSections: the area's own to-dos first, then its projects with to-dos,
+// each a folded row that opens to its to-dos by heading. A search or tag
+// filter opens the projects with matches.
 function areaSections(tasks) {
   const filtered = Boolean(state.query.trim() || activeTagFilter());
   const byProject = new Map();
@@ -533,7 +533,7 @@ function areaSections(tasks) {
     byProject.get(task.project).push(task);
   }
   const projects = liveProjects()
-    .filter((project) => project.area === state.scope.id && (!filtered || byProject.has(project.uuid)))
+    .filter((project) => project.area === state.scope.id && byProject.has(project.uuid))
     .sort(byIndex);
   const listed = new Set(projects.map((project) => project.uuid));
   // To-dos of a project the model does not list as live keep a fold too.
@@ -541,7 +541,8 @@ function areaSections(tasks) {
     const project = findScopeItem("project", uuid);
     if (!listed.has(uuid) && project) projects.push(project);
   }
-  const sections = [];
+  const loose = tasks.filter((task) => !task.project);
+  const sections = loose.length ? [{ title: "", kind: "", tasks: loose }] : [];
   for (const project of projects) {
     const rows = byProject.get(project.uuid) || [];
     const open = filtered || expandedProjects.has(project.uuid);
@@ -561,8 +562,6 @@ function areaSections(tasks) {
       if (under.length) sections.push({ title: heading.title, kind: "heading", heading: heading.uuid, nested: true, tasks: under });
     }
   }
-  const loose = tasks.filter((task) => !task.project);
-  if (loose.length) sections.push({ title: "", kind: "", tasks: loose });
   return sections;
 }
 
@@ -1239,7 +1238,7 @@ function renderTasks() {
     groupTasks(tasks)
       .map(
         (section) => `
-        <section class="task-section${section.evening ? " evening" : ""}${section.nested ? " nested" : ""}${section.kind === "project-fold" && !section.open ? " folded" : ""}" data-section-heading="${escapeHtml(section.heading || "")}"${section.evening ? ' data-evening="1"' : ""}>
+        <section class="task-section${section.evening ? " evening" : ""}${section.nested ? " nested" : ""}${section.kind === "project-fold" && !section.open ? " folded" : ""}"${section.kind === "project-fold" ? ` data-fold-section="${escapeHtml(section.project.uuid)}"` : ""} data-section-heading="${escapeHtml(section.heading || "")}"${section.evening ? ' data-evening="1"' : ""}>
           ${sectionHeading(section)}
           <div class="task-section-rows">${section.tasks.map(taskRow).join("")}</div>
         </section>`,
@@ -2688,12 +2687,14 @@ async function reorderProject(moved, order) {
   else if (prev) project.index = prev.index + 1;
   else if (next) project.index = next.index - 1;
   renderSidebar();
+  if (state.scope?.type === "area") renderTasks();
   try {
     await api("/api/reorder", { method: "POST", body: JSON.stringify({ view: "projects", moved, order }) });
     sync({ fresh: true, quiet: true });
   } catch (error) {
     project.index = before;
     renderSidebar();
+    if (state.scope?.type === "area") renderTasks();
     toast(`Could not move “${project.title}”: ${error.message}`, "error");
   }
 }
@@ -2857,6 +2858,13 @@ const dragKinds = {
     peers: (row) => [...row.parentElement.querySelectorAll(".check-item[data-item]:not(.new)")].filter((item) => item.dataset.item),
     drop: (moved, order, row) => checklistAction(row.closest(".task-row").dataset.task, "reorder", { uuid: moved, order }),
   },
+  // Projects in an area's list, dragged by their row.
+  fold: {
+    selector: ".task-section[data-fold-section]",
+    key: (row) => row.dataset.foldSection,
+    peers: () => [...els.tasks.querySelectorAll(".task-section[data-fold-section]")],
+    drop: (moved, order) => reorderProject(moved, areaProjectOrder(moved, order)),
+  },
   area: {
     selector: ".mini-item.area-row",
     key: (row) => row.dataset.scopeId,
@@ -2940,6 +2948,22 @@ function startLongPress(event) {
   }, longPressDelay);
 }
 
+// areaProjectOrder places moved among all projects of its area, also those
+// the list leaves out, as order (the listed ones) asks.
+function areaProjectOrder(moved, order) {
+  const project = findScopeItem("project", moved);
+  const all = liveProjects()
+    .filter((item) => item.area === project?.area && item.uuid !== moved)
+    .sort(byIndex)
+    .map((item) => item.uuid);
+  const at = order.indexOf(moved);
+  const next = order[at + 1];
+  const prev = order[at - 1];
+  if (next) all.splice(all.indexOf(next), 0, moved);
+  else all.splice(prev ? all.indexOf(prev) + 1 : all.length, 0, moved);
+  return all;
+}
+
 function startDrag(event) {
   state.lastPointer = event.pointerType;
   if (event.pointerType !== "mouse" && !event.target.closest(".drag-handle, .item-handle")) {
@@ -2953,6 +2977,11 @@ function startDrag(event) {
     return;
   }
   if (!canReorder() || event.button > 0 || event.target.closest(".task-editor, .check, a")) return;
+  const foldHead = event.target.closest(".project-fold");
+  if (foldHead) {
+    if (event.pointerType === "mouse") Object.assign(drag, { row: foldHead.closest(".task-section"), uuids: [], kind: "fold", startY: event.clientY, active: false, target: null, into: null });
+    return;
+  }
   const sidebarRow = event.target.closest(".mini-item.project-row, .mini-item.area-row");
   const projectRow = sidebarRow;
   const row = sidebarRow || event.target.closest(".task-row[data-task]");
