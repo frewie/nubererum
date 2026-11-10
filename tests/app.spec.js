@@ -1882,6 +1882,30 @@ test.describe("shortcuts after Things", () => {
     await expect.poll(() => calls.filter((call) => call.path === "/api/create").map((call) => call.body.title).sort()).toEqual(["Between", "Bread", "Milk"]);
   });
 
+  test("a list pasted into New To-Do becomes one to-do per line or per semicolon", async ({ page }) => {
+    const calls = [];
+    await setup(page, calls, [task("a", "Alpha", ["anytime"])]);
+    const input = page.locator("#quick-add input[name=title]");
+    const paste = (text) =>
+      input.evaluate((element, value) => {
+        const data = new DataTransfer();
+        data.setData("text/plain", value);
+        element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      }, text);
+    const created = () => calls.filter((call) => call.path === "/api/create").map((call) => call.body.title);
+    await input.click();
+    await input.fill("typed");
+    await paste("• Milk\n\n2. Bread\n- [ ] Eggs\r\n");
+    await expect.poll(created).toEqual(["Eggs", "Bread", "Milk"]);
+    await expect(input).toHaveValue("typed");
+    await paste("Call bank; write letter ;");
+    await expect.poll(created).toEqual(["Eggs", "Bread", "Milk", "write letter", "Call bank"]);
+    // A single title is pasted as text.
+    await paste("Just one");
+    await page.waitForTimeout(200);
+    expect(created()).toHaveLength(5);
+  });
+
   test("the cheat sheet lists the shortcuts", async ({ page }) => {
     const calls = [];
     await setup(page, calls, [task("a", "Alpha", ["anytime"])]);
