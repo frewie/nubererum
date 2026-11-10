@@ -395,6 +395,39 @@ function toggleAreaFilter(uuid) {
   render();
 }
 
+// todayGrouped: Today groups its to-dos by project or area (the default), or
+// shows one list to put the day in order. Remembered per browser.
+const todayGroupedKey = "things-today-grouped";
+let todayGroupedValue = (() => {
+  try {
+    return localStorage.getItem(todayGroupedKey) !== "0";
+  } catch {
+    return true;
+  }
+})();
+
+function todayGrouped() {
+  return todayGroupedValue;
+}
+
+function toggleTodayGrouped() {
+  todayGroupedValue = !todayGroupedValue;
+  try {
+    localStorage.setItem(todayGroupedKey, todayGroupedValue ? "1" : "0");
+  } catch {
+    // Storage is optional.
+  }
+  renderTasks();
+}
+
+// listOptions is the row above Today: the area filter and the grouping.
+function listOptions() {
+  const areas = areaFilterBar();
+  if (state.scope || state.view !== "today" || !state.model) return areas;
+  const grouping = `<button type="button" class="pill today-grouping${todayGrouped() ? " active" : ""}" data-today-grouping aria-pressed="${todayGrouped()}" title="Off: one list to put the day in order">Group by project</button>`;
+  return `<div class="list-options">${areas || "<span></span>"}${grouping}</div>`;
+}
+
 // listTasks returns the to-dos of the list on screen, filtered by the search,
 // the area filter and, unless withoutTagFilter, the tag filter.
 function listTasks(withoutTagFilter = false) {
@@ -452,13 +485,16 @@ function groupTasks(tasks) {
     return groupBy(tasks, (task) => dayLabel(task.scheduledDate || task.todayDate), () => "day");
   }
   if (state.view === "today") {
-    // This Evening comes last, as in Things.
-    const byProject = (rows) =>
-      groupBy(
+    // This Evening comes last, as in Things. Ungrouped, Today is one list in
+    // the order of the day.
+    const byProject = (rows) => {
+      if (!todayGrouped()) return [{ title: "", kind: "", tasks: rows }];
+      return groupBy(
         rows,
         (task) => task.projectTitle || task.areaTitle || "",
         (task) => (task.projectTitle ? "project" : "area"),
       );
+    };
     const evening = tasks.filter((task) => task.evening);
     const groups = byProject(tasks.filter((task) => !task.evening));
     if (evening.length) groups.push({ title: "This Evening", kind: "evening", evening: true, tasks: evening });
@@ -716,7 +752,13 @@ function taskRow(task) {
     inline.push(`<span class="inline-count" title="Checklist">${icons.checklist}${done}/${task.checklist.length}</span>`);
   }
   for (const tag of task.tags || []) inline.push(`<span class="pill tag">${escapeHtml(tag)}</span>`);
-  const grouped = state.scope || ["today", "anytime", "someday"].includes(state.view);
+  // Outside Today a star marks the to-dos in Today (a moon This Evening), as
+  // in Things.
+  const inToday = (state.scope || state.view !== "today") && !isDone(task) && (task.views || []).includes("today");
+  const star = inToday
+    ? `<span class="today-mark" title="${task.evening ? "This Evening" : "Today"}">${task.evening ? icons.evening : icons.today}</span>`
+    : "";
+  const grouped = state.scope || ["anytime", "someday"].includes(state.view) || (state.view === "today" && todayGrouped());
   const context = grouped ? "" : task.projectTitle || task.areaTitle || "";
   const meta = [];
   if (task.deadline) meta.push(`<span class="pill deadline" title="Deadline">${icons.flag}${escapeHtml(formatDate(task.deadline))}</span>`);
@@ -731,7 +773,7 @@ function taskRow(task) {
           ${handle}
           <button class="check${isDone(task) ? " checked" : ""}${task.status === "canceled" ? " canceled" : ""}" type="button" title="${label}${isDone(task) ? "" : " (Alt+click: cancel)"}" aria-label="${label} ${escapeHtml(task.title)}" data-complete="${escapeHtml(task.uuid)}"></button>
           <div class="task-main">
-            <div class="task-line"><span class="task-title">${escapeHtml(task.title)}</span>${inline.join("")}</div>
+            <div class="task-line">${star}<span class="task-title">${escapeHtml(task.title)}</span>${inline.join("")}</div>
             ${context ? `<div class="task-sub">${escapeHtml(context)}</div>` : ""}
           </div>
           <div class="task-meta">${meta.join("")}</div>
@@ -1117,7 +1159,7 @@ function renderTasks() {
 
   els.summary.textContent = tasks.length === 1 ? "1 to-do" : `${tasks.length} to-dos`;
 
-  const projectsHtml = areaFilterBar() + tagFilterBar(listTasks(true)) + projectRows();
+  const projectsHtml = listOptions() + tagFilterBar(listTasks(true)) + projectRows();
   const projectScope = state.scope?.type === "project";
   els.newHeading.hidden = !projectScope;
   els.deleteProject.hidden = !projectScope;
@@ -3144,6 +3186,10 @@ async function init() {
     }
     if (event.target.closest("[data-archive-more]")) {
       loadArchive(state.view, Math.min((state.archive[state.view]?.limit || 300) + 300, 2000));
+      return;
+    }
+    if (event.target.closest("[data-today-grouping]")) {
+      toggleTodayGrouped();
       return;
     }
     const areaFilter = event.target.closest("[data-area-filter]");

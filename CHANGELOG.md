@@ -8,6 +8,8 @@ All notable changes to NubeRerum. The format follows [Keep a Changelog](https://
 
 - **Area filter:** Today, Upcoming, Anytime and Someday have an area bar ("All", then the areas of the list's to-dos). Choosing an area shows only its to-dos, including those in its projects; each list remembers its choice in the browser, also after a reload. New to-dos added while an area is chosen go to that area.
 - **Paste a list:** a list pasted into "New To-Do" now becomes one to-do per line (as pasting outside a text field already did), and a single line with semicolons one to-do per part. Bullets, dashes, numbers and checkboxes are dropped. A single title is still pasted as text.
+- **Today star:** outside Today (projects, areas, Anytime, Someday) a yellow star marks the to-dos that are in Today, a moon those for This Evening, as in Things. It appears and goes away as soon as a to-do is moved into or out of Today.
+- **Order the day:** "Group by project" in Today switches between the groups by project or area and one list in the order of the day, with the project or area below each to-do. Drag (or Mod+↑/↓) to put the day in order; the order is Things' own Today order and shows in the Things apps. Each browser remembers the choice.
 
 ### Fixes
 

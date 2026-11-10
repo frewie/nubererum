@@ -1745,6 +1745,39 @@ h1 .rename-input {
   font-weight: 600;
 }
 
+.list-options {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.list-options .area-filter {
+  flex: 1;
+}
+
+.today-grouping {
+  cursor: pointer;
+  flex: none;
+  border: 1px solid transparent;
+  margin: 0 0 12px;
+}
+
+.today-grouping.active {
+  border-color: var(--accent, #2b84e6);
+}
+
+.today-mark {
+  display: inline-flex;
+  flex: none;
+  margin-right: 4px;
+}
+
+.today-mark .icon {
+  width: 14px;
+  height: 14px;
+}
+
 .tags-list {
   list-style: none;
   margin: 0;
