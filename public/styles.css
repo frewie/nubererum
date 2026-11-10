@@ -1745,6 +1745,62 @@ h1 .rename-input {
   font-weight: 600;
 }
 
+.project-fold {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-fold-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fold-arrow {
+  width: 12px;
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.fold-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-fold-open {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8em;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.project-fold-open:hover,
+.project-fold-open:focus-visible {
+  color: var(--accent, #2b84e6);
+}
+
+.task-section.folded {
+  margin-bottom: 4px;
+}
+
+.task-section.nested {
+  margin-left: 28px;
+}
+
 .list-options {
   display: flex;
   align-items: flex-start;

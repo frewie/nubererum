@@ -478,9 +478,7 @@ function groupTasks(tasks) {
       })),
     ];
   }
-  if (state.scope?.type === "area") {
-    return groupBy(tasks, (task) => task.projectTitle || "", () => "project");
-  }
+  if (state.scope?.type === "area") return areaSections(tasks);
   if (state.view === "upcoming") {
     return groupBy(tasks, (task) => dayLabel(task.scheduledDate || task.todayDate), () => "day");
   }
@@ -489,9 +487,12 @@ function groupTasks(tasks) {
     // the order of the day.
     const byProject = (rows) => {
       if (!todayGrouped()) return [{ title: "", kind: "", tasks: rows }];
+      // With an area filter, the area's own to-dos come first without a
+      // heading; its projects follow.
+      const area = activeAreaFilter();
       return groupBy(
         rows,
-        (task) => task.projectTitle || task.areaTitle || "",
+        (task) => task.projectTitle || (area && task.area === area ? "" : task.areaTitle) || "",
         (task) => (task.projectTitle ? "project" : "area"),
       );
     };
@@ -508,6 +509,61 @@ function groupTasks(tasks) {
     );
   }
   return [{ title: "", kind: "", tasks }];
+}
+
+// expandedProjects are the projects opened in an area; like Things, an area
+// shows its projects folded until one is opened.
+const expandedProjects = new Set();
+
+function toggleProjectFold(uuid) {
+  if (expandedProjects.has(uuid)) expandedProjects.delete(uuid);
+  else expandedProjects.add(uuid);
+  renderTasks();
+}
+
+// areaSections follow Things' area view: the area's projects first, each a
+// folded row that opens to its to-dos by heading, then the area's own
+// to-dos. A search or tag filter shows only projects with matches, open.
+function areaSections(tasks) {
+  const filtered = Boolean(state.query.trim() || activeTagFilter());
+  const byProject = new Map();
+  for (const task of tasks) {
+    if (!task.project) continue;
+    if (!byProject.has(task.project)) byProject.set(task.project, []);
+    byProject.get(task.project).push(task);
+  }
+  const projects = liveProjects()
+    .filter((project) => project.area === state.scope.id && (!filtered || byProject.has(project.uuid)))
+    .sort(byIndex);
+  const listed = new Set(projects.map((project) => project.uuid));
+  // To-dos of a project the model does not list as live keep a fold too.
+  for (const uuid of byProject.keys()) {
+    const project = findScopeItem("project", uuid);
+    if (!listed.has(uuid) && project) projects.push(project);
+  }
+  const sections = [];
+  for (const project of projects) {
+    const rows = byProject.get(project.uuid) || [];
+    const open = filtered || expandedProjects.has(project.uuid);
+    const headings = (state.model.headings || []).filter((heading) => heading.project === project.uuid).sort(byIndex);
+    const known = new Set(headings.map((heading) => heading.uuid));
+    sections.push({
+      title: project.title,
+      kind: "project-fold",
+      project,
+      open,
+      count: rows.filter((task) => !isDone(task)).length,
+      tasks: open ? rows.filter((task) => !known.has(task.heading)) : [],
+    });
+    if (!open) continue;
+    for (const heading of headings) {
+      const under = rows.filter((task) => task.heading === heading.uuid);
+      if (under.length) sections.push({ title: heading.title, kind: "heading", heading: heading.uuid, nested: true, tasks: under });
+    }
+  }
+  const loose = tasks.filter((task) => !task.project);
+  if (loose.length) sections.push({ title: "", kind: "", tasks: loose });
+  return sections;
 }
 
 function groupBy(tasks, titleForTask, kindForTask) {
@@ -1113,6 +1169,12 @@ function canReorder() {
 }
 
 function sectionHeading(section) {
+  if (section.kind === "project-fold") {
+    const project = section.project;
+    return `<h2 class="project-fold"><button type="button" class="project-fold-toggle" data-fold-project="${escapeHtml(project.uuid)}" aria-expanded="${section.open}" title="${section.open ? "Collapse" : "Expand"}">
+        <span class="fold-arrow" aria-hidden="true">${section.open ? "▾" : "▸"}</span>${projectPie(project)}<span class="fold-title">${escapeHtml(project.title)}</span>${section.count ? `<span class="pill">${section.count}</span>` : ""}
+      </button>${scopeButton("project", project, "project-fold-open")}Open</button></h2>`;
+  }
   if (!section.title) return "";
   if (section.kind === "heading") return `<h2 class="heading" data-heading-drop="${escapeHtml(section.heading)}" data-heading-title="${escapeHtml(section.title)}">${escapeHtml(section.title)}</h2>`;
   const icon = icons[section.kind] || "";
@@ -1177,7 +1239,7 @@ function renderTasks() {
     groupTasks(tasks)
       .map(
         (section) => `
-        <section class="task-section${section.evening ? " evening" : ""}" data-section-heading="${escapeHtml(section.heading || "")}"${section.evening ? ' data-evening="1"' : ""}>
+        <section class="task-section${section.evening ? " evening" : ""}${section.nested ? " nested" : ""}${section.kind === "project-fold" && !section.open ? " folded" : ""}" data-section-heading="${escapeHtml(section.heading || "")}"${section.evening ? ' data-evening="1"' : ""}>
           ${sectionHeading(section)}
           <div class="task-section-rows">${section.tasks.map(taskRow).join("")}</div>
         </section>`,
@@ -3186,6 +3248,11 @@ async function init() {
     }
     if (event.target.closest("[data-archive-more]")) {
       loadArchive(state.view, Math.min((state.archive[state.view]?.limit || 300) + 300, 2000));
+      return;
+    }
+    const projectFold = event.target.closest("[data-fold-project]");
+    if (projectFold) {
+      toggleProjectFold(projectFold.dataset.foldProject);
       return;
     }
     if (event.target.closest("[data-today-grouping]")) {

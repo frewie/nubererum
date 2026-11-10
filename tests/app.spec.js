@@ -1213,6 +1213,75 @@ test("Today filters by area, including the area's projects, and remembers the ch
   await expect(page.locator(".task-title")).toContainText(["Loose today", "Fix door"]);
 });
 
+test("an area shows its projects folded; opened, a project lists its to-dos by heading", async ({ page }) => {
+  const work = { uuid: "a-work", title: "Work", type: "area", index: 0, count: 4 };
+  const rampo = { uuid: "p-rampo", title: "Rampo", type: "project", area: work.uuid, index: 0, count: 3, status: "open", when: "anytime" };
+  const infa = { uuid: "p-infa", title: "INFA", type: "project", area: work.uuid, index: 1, count: 0, status: "open", when: "anytime" };
+  const inRampo = (item, heading = "") => ({ ...item, area: work.uuid, areaTitle: work.title, project: rampo.uuid, projectTitle: rampo.title, heading });
+  const data = model(
+    [
+      { ...task("t1", "Loose work", ["anytime"]), area: work.uuid, areaTitle: work.title },
+      inRampo(task("t2", "No heading", ["anytime"])),
+      inRampo(task("t3", "Under live", ["anytime"]), "h-live"),
+      inRampo(task("t4", "Under api", ["anytime"]), "h-api"),
+    ],
+    {
+      areas: [work],
+      projects: [rampo, infa],
+      headings: [
+        { uuid: "h-live", title: "Live", project: rampo.uuid, index: 0 },
+        { uuid: "h-api", title: "API", project: rampo.uuid, index: 1 },
+        { uuid: "h-empty", title: "Empty", project: rampo.uuid, index: 2 },
+      ],
+    },
+  );
+  await mockApp(page, {
+    "GET /api/status": signedIn,
+    "GET /api/sync": (route) => route.fulfill({ json: data }),
+  });
+  await page.goto("/");
+  await page.locator(`.area-row[data-scope-id="a-work"]`).click();
+  const folds = page.locator("[data-fold-project]");
+  await expect(folds).toHaveText([/Rampo\s*3/, /INFA/]);
+  await expect(folds.first()).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".task-title")).toHaveText(["Loose work"]);
+  await folds.first().click();
+  await expect(page.locator(".task-title")).toHaveText(["No heading", "Under live", "Under api", "Loose work"]);
+  await expect(page.locator(".task-section.nested h2")).toHaveText(["Live", "API"]);
+  // Open goes to the project.
+  await page.locator(".project-fold-open", { hasText: "Open" }).first().click();
+  await expect(page.locator("#view-title")).toHaveText("Rampo");
+  // A search opens the projects with matches.
+  await page.locator(`.area-row[data-scope-id="a-work"]`).click();
+  await folds.first().click();
+  await expect(page.locator(".task-title")).toHaveText(["Loose work"]);
+  await page.locator("#search").fill("api");
+  await expect(page.locator(".task-title")).toHaveText(["Under api"]);
+  await expect(folds).toHaveCount(1);
+});
+
+test("Today filtered by an area lists the area's own to-dos first, without a heading", async ({ page }) => {
+  const work = { uuid: "a-work", title: "Work", type: "area", index: 0 };
+  const home = { uuid: "a-home", title: "Home", type: "area", index: 1 };
+  const rampo = { uuid: "p-rampo", title: "Rampo", type: "project", area: work.uuid, index: 0, status: "open", when: "anytime" };
+  const data = model(
+    [
+      { ...task("t1", "Rampo step"), area: work.uuid, project: rampo.uuid, projectTitle: rampo.title },
+      { ...task("t2", "Loose work"), area: work.uuid, areaTitle: work.title },
+      { ...task("t3", "Fix door"), area: home.uuid, areaTitle: home.title },
+    ],
+    { areas: [work, home], projects: [rampo] },
+  );
+  await mockApp(page, {
+    "GET /api/status": signedIn,
+    "GET /api/sync": (route) => route.fulfill({ json: data }),
+  });
+  await page.goto("/");
+  await page.locator(".area-filter").getByRole("button", { name: "Work" }).click();
+  await expect(page.locator(".task-title")).toHaveText(["Loose work", "Rampo step"]);
+  await expect(page.locator(".task-section h2")).toHaveText(["Rampo"]);
+});
+
 test("areas carry tags: the area header sets them, their to-dos match them in the tag bar", async ({ page }) => {
   const calls = [];
   const work = { uuid: "tag-work", title: "Work" };
