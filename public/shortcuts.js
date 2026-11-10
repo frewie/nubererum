@@ -18,7 +18,7 @@ const shortcuts = [
   // Create
   { group: "Create", label: "New to-do", keys: ["Mod+KeyN", "Alt+KeyN", "KeyN"], run: () => focusQuickAdd() },
   { group: "Create", label: "New to-do below selection", keys: ["Space"], run: () => focusQuickAdd({ belowSelection: true }) },
-  { group: "Create", label: "New to-dos from clipboard", keys: ["Mod+KeyV"], note: "Paste text: one to-do per line", passive: true },
+  { group: "Create", label: "New to-dos from clipboard", keys: ["Mod+KeyV"], note: "Paste text, also into New To-Do: one to-do per line or per semicolon", passive: true },
   { group: "Create", label: "New checklist in open to-do", keys: ["Mod+Shift+KeyC", "Alt+Shift+KeyC"], editor: true, run: () => focusEditorField(".item-new") },
   { group: "Create", label: "New project", keys: ["Mod+Alt+KeyN"], run: () => openNewProject() },
   { group: "Create", label: "New heading", keys: ["Mod+Shift+KeyN", "Alt+Shift+KeyN"], run: () => newHeading() },
@@ -547,17 +547,41 @@ document.addEventListener("copy", (event) => {
   toast(titles.length === 1 ? "Copied the to-do" : `Copied ${titles.length} to-dos`);
 });
 
-document.addEventListener("paste", (event) => {
-  if (typingTarget(event.target) || state.editing || els.quickAdd.hidden) return;
-  const lines = (event.clipboardData?.getData("text/plain") || "")
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*(?:[-*•]|\[ ?\]|\d+[.)])\s+/, "").trim())
+// pastedTitles splits pasted text into to-do titles: one per line, or, for a
+// single line, one per semicolon. List marks (bullets, dashes, checkboxes,
+// numbers) are dropped; at most 50 titles.
+function pastedTitles(text) {
+  let parts = String(text || "").split(/\r?\n/);
+  if (parts.filter((line) => line.trim()).length === 1) parts = parts.join("").split(";");
+  return parts
+    .map((line) => line.replace(/^\s*(?:[-*•–—◦▪‣]|\[[ xX]?\]|\d+[.)])\s*(?:\[[ xX]?\]\s*)?/, "").trim())
     .filter(Boolean)
     .slice(0, 50);
-  if (!lines.length) return;
-  event.preventDefault();
-  for (const line of lines.reverse()) {
-    els.quickAdd.elements.title.value = line;
-    createTask(els.quickAdd);
+}
+
+// createPastedTodos adds one to-do per title through quick add, in the pasted
+// order; whatever was typed in quick add stays there.
+function createPastedTodos(titles) {
+  const form = els.quickAdd;
+  const typed = form.elements.title.value;
+  const note = form.elements.note.value;
+  form.elements.note.value = "";
+  for (const title of [...titles].reverse()) {
+    form.elements.title.value = title;
+    createTask(form);
   }
+  form.elements.title.value = typed;
+  form.elements.note.value = note;
+  if (titles.length > 1) toast(`Added ${titles.length} to-dos`);
+}
+
+document.addEventListener("paste", (event) => {
+  if (state.editing || els.quickAdd.hidden) return;
+  const inQuickAdd = event.target === els.quickAdd.elements.title;
+  if (typingTarget(event.target) && !inQuickAdd) return;
+  const titles = pastedTitles(event.clipboardData?.getData("text/plain"));
+  // In the quick add field a single title is pasted as text, as usual.
+  if (!titles.length || (inQuickAdd && titles.length < 2)) return;
+  event.preventDefault();
+  createPastedTodos(titles);
 });

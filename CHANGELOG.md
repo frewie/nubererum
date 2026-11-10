@@ -7,6 +7,7 @@ All notable changes to NubeRerum. The format follows [Keep a Changelog](https://
 ### Features
 
 - **Area filter:** Today, Upcoming, Anytime and Someday have an area bar ("All", then the areas of the list's to-dos). Choosing an area shows only its to-dos, including those in its projects; each list remembers its choice in the browser, also after a reload. New to-dos added while an area is chosen go to that area.
+- **Paste a list:** a list pasted into "New To-Do" now becomes one to-do per line (as pasting outside a text field already did), and a single line with semicolons one to-do per part. Bullets, dashes, numbers and checkboxes are dropped. A single title is still pasted as text.
 
 ### Fixes
 
