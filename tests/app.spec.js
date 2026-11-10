@@ -429,6 +429,46 @@ async function dragRow(page, from, to, { after = false } = {}) {
   await page.mouse.up();
 }
 
+test("Today ungrouped is one list to order the day; elsewhere a star marks Today's to-dos", async ({ page }) => {
+  let request = null;
+  const project = { uuid: "p-rampo", title: "Rampo", type: "project", index: 0, count: 2, status: "open", when: "anytime" };
+  const inProject = (item) => ({ ...item, project: project.uuid, projectTitle: project.title });
+  const tasks = [
+    task("a", "Loose"),
+    inProject(task("b", "Rampo step")),
+    { ...task("c", "Errand"), area: "a-home", areaTitle: "Home" },
+    inProject(task("d", "Later", ["anytime"])),
+    { ...inProject(task("e", "Tonight")), evening: true },
+  ];
+  await mockApp(page, {
+    "GET /api/status": signedIn,
+    "GET /api/sync": (route) => route.fulfill({ json: model(tasks, { projects: [project], areas: [{ uuid: "a-home", title: "Home", type: "area", index: 0 }] }) }),
+    "POST /api/reorder": (route, req) => {
+      request = req.postDataJSON();
+      return route.fulfill({ json: { reordered: true } });
+    },
+  });
+  await page.goto("/");
+  await expect(page.locator(".task-section h2")).toContainText(["Rampo", "Home", "This Evening"]);
+  // No star inside Today.
+  await expect(page.locator(".today-mark")).toHaveCount(0);
+  await page.getByRole("button", { name: "Group by project" }).click();
+  await expect(page.locator(".task-section h2")).toHaveText(["This Evening"]);
+  await expect(page.locator(".task-row", { hasText: "Rampo step" }).locator(".task-sub")).toHaveText("Rampo");
+  await dragRow(page, "Errand", "Loose");
+  await expect.poll(() => request).toEqual({ view: "today", moved: "c", order: ["c", "a", "b"] });
+  // The choice stays after a reload.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Group by project" })).toHaveAttribute("aria-pressed", "false");
+
+  await page.locator(`.project-row[data-scope-id="p-rampo"]`).click();
+  await expect(page.locator(".task-row", { hasText: "Rampo step" }).locator(".today-mark")).toHaveAttribute("title", "Today");
+  await expect(page.locator(".task-row", { hasText: "Tonight" }).locator(".today-mark")).toHaveAttribute("title", "This Evening");
+  await expect(page.locator(".task-row", { hasText: "Later" }).locator(".today-mark")).toHaveCount(0);
+  await page.locator(".nav-item", { hasText: "Anytime" }).click();
+  await expect(page.locator(".today-mark")).toHaveCount(4);
+});
+
 test("dragging a to-do reorders it at once and saves the section order", async ({ page }) => {
   let request = null;
   // Like the server, the sync after the write shows the new order.
