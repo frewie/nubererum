@@ -1213,10 +1213,12 @@ test("Today filters by area, including the area's projects, and remembers the ch
   await expect(page.locator(".task-title")).toContainText(["Loose today", "Fix door"]);
 });
 
-test("an area shows its projects folded; opened, a project lists its to-dos by heading", async ({ page }) => {
+test("an area lists its own to-dos, then its projects folded; opened, a project lists its to-dos by heading", async ({ page }) => {
+  let reorder = null;
   const work = { uuid: "a-work", title: "Work", type: "area", index: 0, count: 4 };
   const rampo = { uuid: "p-rampo", title: "Rampo", type: "project", area: work.uuid, index: 0, count: 3, status: "open", when: "anytime" };
   const infa = { uuid: "p-infa", title: "INFA", type: "project", area: work.uuid, index: 1, count: 0, status: "open", when: "anytime" };
+  const orion = { uuid: "p-orion", title: "Orion", type: "project", area: work.uuid, index: 2, count: 1, status: "open", when: "anytime" };
   const inRampo = (item, heading = "") => ({ ...item, area: work.uuid, areaTitle: work.title, project: rampo.uuid, projectTitle: rampo.title, heading });
   const data = model(
     [
@@ -1224,10 +1226,11 @@ test("an area shows its projects folded; opened, a project lists its to-dos by h
       inRampo(task("t2", "No heading", ["anytime"])),
       inRampo(task("t3", "Under live", ["anytime"]), "h-live"),
       inRampo(task("t4", "Under api", ["anytime"]), "h-api"),
+      { ...task("t5", "Orion step", ["anytime"]), area: work.uuid, project: orion.uuid, projectTitle: orion.title },
     ],
     {
       areas: [work],
-      projects: [rampo, infa],
+      projects: [rampo, infa, orion],
       headings: [
         { uuid: "h-live", title: "Live", project: rampo.uuid, index: 0 },
         { uuid: "h-api", title: "API", project: rampo.uuid, index: 1 },
@@ -1238,22 +1241,41 @@ test("an area shows its projects folded; opened, a project lists its to-dos by h
   await mockApp(page, {
     "GET /api/status": signedIn,
     "GET /api/sync": (route) => route.fulfill({ json: data }),
+    "POST /api/reorder": (route, request) => {
+      reorder = request.postDataJSON();
+      // Like the server, the next sync shows the new order.
+      for (const project of data.projects) project.index = reorder.order.indexOf(project.uuid);
+      return route.fulfill({ json: { reordered: true } });
+    },
   });
   await page.goto("/");
   await page.locator(`.area-row[data-scope-id="a-work"]`).click();
   const folds = page.locator("[data-fold-project]");
-  await expect(folds).toHaveText([/Rampo\s*3/, /INFA/]);
+  // INFA has no to-dos and is left out.
+  await expect(folds).toHaveText([/Rampo\s*3/, /Orion\s*1/]);
   await expect(folds.first()).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator(".task-title")).toHaveText(["Loose work"]);
-  await folds.first().click();
-  await expect(page.locator(".task-title")).toHaveText(["No heading", "Under live", "Under api", "Loose work"]);
+
+  // Projects are reordered by dragging their row; the hidden INFA keeps its place.
+  const from = await page.locator(".project-fold", { hasText: "Orion" }).boundingBox();
+  const to = await page.locator(".project-fold", { hasText: "Rampo" }).boundingBox();
+  await page.mouse.move(from.x + 200, from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(to.x + 200, to.y + 2, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => reorder).toEqual({ view: "projects", moved: "p-orion", order: ["p-orion", "p-rampo", "p-infa"] });
+  await expect(folds).toHaveText([/Orion/, /Rampo/]);
+  await expect(folds.first()).toHaveAttribute("aria-expanded", "false");
+
+  await page.locator(".project-fold", { hasText: "Rampo" }).locator("[data-fold-project]").click();
+  await expect(page.locator(".task-title")).toHaveText(["Loose work", "No heading", "Under live", "Under api"]);
   await expect(page.locator(".task-section.nested h2")).toHaveText(["Live", "API"]);
   // Open goes to the project.
-  await page.locator(".project-fold-open", { hasText: "Open" }).first().click();
+  await page.locator(".project-fold", { hasText: "Rampo" }).locator(".project-fold-open").click();
   await expect(page.locator("#view-title")).toHaveText("Rampo");
   // A search opens the projects with matches.
   await page.locator(`.area-row[data-scope-id="a-work"]`).click();
-  await folds.first().click();
+  await page.locator(".project-fold", { hasText: "Rampo" }).locator("[data-fold-project]").click();
   await expect(page.locator(".task-title")).toHaveText(["Loose work"]);
   await page.locator("#search").fill("api");
   await expect(page.locator(".task-title")).toHaveText(["Under api"]);

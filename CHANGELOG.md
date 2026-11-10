@@ -6,7 +6,7 @@ All notable changes to NubeRerum. The format follows [Keep a Changelog](https://
 
 ### Features
 
-- **Areas like in Things:** an area lists its projects first, each folded with its progress and open to-dos; a click opens it to its to-dos under their headings, "Open" goes to the project. The area's own to-dos follow. A search or tag filter opens the projects with matches.
+- **Areas like in Things:** an area lists its own to-dos first, then its projects with to-dos, each folded to one compact line with its progress and open to-dos; a click opens it to its to-dos under their headings, "Open" goes to the project. Drag a project's line to reorder the projects (the sidebar shows the same order). A search or tag filter opens the projects with matches.
 - **Today by area:** with an area chosen, Today lists the area's own to-dos first without a heading, then its projects.
 - **Area filter:** Today, Upcoming, Anytime and Someday have an area bar ("All", then the areas of the list's to-dos). Choosing an area shows only its to-dos, including those in its projects; each list remembers its choice in the browser, also after a reload. New to-dos added while an area is chosen go to that area.
 - **Paste a list:** a list pasted into "New To-Do" now becomes one to-do per line (as pasting outside a text field already did), and a single line with semicolons one to-do per part. Bullets, dashes, numbers and checkboxes are dropped. A single title is still pasted as text.
