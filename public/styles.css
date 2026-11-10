@@ -1725,19 +1725,22 @@ h1 .rename-input {
   font-size: 0.9em;
 }
 
-.tag-filter {
+.tag-filter,
+.area-filter {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin: 0 0 12px;
 }
 
-.tag-filter-pill {
+.tag-filter-pill,
+.area-filter-pill {
   cursor: pointer;
   border: 1px solid transparent;
 }
 
-.tag-filter-pill.active {
+.tag-filter-pill.active,
+.area-filter-pill.active {
   border-color: var(--accent, #2b84e6);
   font-weight: 600;
 }

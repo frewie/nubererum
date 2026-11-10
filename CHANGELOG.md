@@ -4,6 +4,10 @@ All notable changes to NubeRerum. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Features
+
+- **Area filter:** Today, Upcoming, Anytime and Someday have an area bar ("All", then the areas of the list's to-dos). Choosing an area shows only its to-dos, including those in its projects; each list remembers its choice in the browser, also after a reload. New to-dos added while an area is chosen go to that area.
+
 ### Fixes
 
 - To-dos created under a heading over MCP (`create_todo` with `heading`) showed without their heading in the web app, while Things showed them under it. The web app now reads them like Things does, and new ones are written like Things writes them (the heading only, no separate project).

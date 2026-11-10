@@ -19,6 +19,7 @@ Cultured Code does not publish a Things Cloud API. The app therefore uses the re
 - Create projects, areas, headings and tags; rename and delete headings, areas and tags.
 - This Evening in Today; cancel to-dos; reminders; make a to-do repeat; convert a to-do to a project.
 - Projects: complete or cancel, When, deadline and tags in the header, a progress pie.
+- Today, Upcoming, Anytime and Someday filter by area (its projects included); each list remembers the choice.
 - Areas carry tags (set in the area header). A tag bar filters every list; to-dos match the tags of their project and area, as in Things.
 - Edit a to-do in place: title, notes, checklist (add, edit, tick, delete, reorder), when, deadline and tags.
 - Complete and reopen to-dos. Completed to-dos stay in their list until "Log Completed" (or Things' daily logging).

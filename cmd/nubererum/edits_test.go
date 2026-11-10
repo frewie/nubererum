@@ -629,3 +629,24 @@ func TestSearchFindsLoggedItemsByTitleAndNotes(t *testing.T) {
 		}
 	}
 }
+
+// A new to-do for Today in an area goes to the top of its area and of Today.
+func TestTopPositionsTodayInAreaUsesToday(t *testing.T) {
+	previousModels := models
+	t.Cleanup(func() { models = previousModels })
+	inArea := map[string]any{"uuid": "a1", "area": "AreaUuid1234567890abcd", "index": -100, "todayIndex": -10}
+	elsewhere := map[string]any{"uuid": "b1", "index": -50, "todayIndex": -900}
+	models = newModelCache(func() (map[string]any, error) {
+		return map[string]any{
+			"tasks": []map[string]any{inArea, elsewhere},
+			"lists": map[string][]map[string]any{"today": {inArea, elsewhere}, "anytime": {inArea, elsewhere}},
+		}, nil
+	})
+	if _, err := models.fresh(); err != nil {
+		t.Fatal(err)
+	}
+	index, todayIndex, ok := topPositions("today", "", "AreaUuid1234567890abcd")
+	if !ok || index != -100-reorderStep || todayIndex != -900-reorderStep {
+		t.Fatalf("topPositions = %d, %d, %v; want %d, %d", index, todayIndex, ok, -100-reorderStep, -900-reorderStep)
+	}
+}

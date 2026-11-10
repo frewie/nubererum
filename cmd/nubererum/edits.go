@@ -65,20 +65,30 @@ func topPositions(when, project, area string) (int, int, bool) {
 	case lists[when] != nil:
 		candidates = lists[when]
 	}
-	if len(candidates) == 0 {
-		return 0, 0, true
+	// The Today position comes from Today itself, also for a new to-do in a
+	// project or area.
+	todayCandidates := candidates
+	if when == "today" && lists["today"] != nil {
+		todayCandidates = lists["today"]
 	}
 	index, todayIndex := 0, 0
 	for i, task := range candidates {
-		ix, ti := int(asNumber(task, "index")), int(asNumber(task, "todayIndex"))
-		if i == 0 || ix < index {
+		if ix := int(asNumber(task, "index")); i == 0 || ix < index {
 			index = ix
 		}
-		if i == 0 || ti < todayIndex {
+	}
+	for i, task := range todayCandidates {
+		if ti := int(asNumber(task, "todayIndex")); i == 0 || ti < todayIndex {
 			todayIndex = ti
 		}
 	}
-	return index - reorderStep, todayIndex - reorderStep, true
+	if len(candidates) > 0 {
+		index -= reorderStep
+	}
+	if len(todayCandidates) > 0 {
+		todayIndex -= reorderStep
+	}
+	return index, todayIndex, true
 }
 
 func filterTasks(tasks []map[string]any, keep func(map[string]any) bool) []map[string]any {

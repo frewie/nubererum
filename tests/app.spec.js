@@ -1123,6 +1123,56 @@ test("the tag bar filters a list; the Tags dialog renames and deletes tags", asy
   await expect(page.locator(".task-row", { hasText: "Fix door" }).locator(".pill.tag")).toHaveCount(0);
 });
 
+test("Today filters by area, including the area's projects, and remembers the choice", async ({ page }) => {
+  const creates = [];
+  const work = { uuid: "a-work", title: "Work", type: "area", index: 0, count: 2 };
+  const home = { uuid: "a-home", title: "Home", type: "area", index: 1, count: 1 };
+  const project = { uuid: "p-rampo", title: "Rampo", type: "project", area: work.uuid, index: 0, count: 1, status: "open", when: "anytime" };
+  const data = model(
+    [
+      task("t1", "Loose today"),
+      { ...task("t2", "Work errand"), area: work.uuid, areaTitle: work.title },
+      { ...task("t3", "Rampo step"), project: project.uuid, projectTitle: project.title },
+      { ...task("t4", "Fix door"), area: home.uuid, areaTitle: home.title },
+    ],
+    { areas: [work, home], projects: [project] },
+  );
+  await mockApp(page, {
+    "GET /api/status": signedIn,
+    "GET /api/sync": (route) => route.fulfill({ json: data }),
+    "POST /api/create": (route, request) => {
+      creates.push(request.postDataJSON());
+      return route.fulfill({ json: { ok: true } });
+    },
+  });
+  await page.goto("/");
+  const bar = page.locator(".area-filter");
+  await expect(bar.locator("[data-area-filter]")).toHaveText(["All", "Work", "Home"]);
+  await expect(bar.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+  await bar.getByRole("button", { name: "Work" }).click();
+  await expect(page.locator(".task-title")).toHaveText(["Work errand", "Rampo step"]);
+  await expect(page.locator("#quick-add input[name=title]")).toHaveAttribute("placeholder", "New To-Do in Work");
+
+  // The choice stays after another list and after a reload.
+  await page.locator(".nav-item", { hasText: "Inbox" }).click();
+  await page.locator(".nav-item", { hasText: "Today" }).click();
+  await expect(page.locator(".task-title")).toHaveText(["Work errand", "Rampo step"]);
+  await page.reload();
+  await expect(page.locator(".task-title")).toHaveText(["Work errand", "Rampo step"]);
+  // Anytime has its own choice.
+  await page.locator(".nav-item", { hasText: "Anytime" }).click();
+  await expect(page.locator(".task-title")).toHaveCount(4);
+  await page.locator(".nav-item", { hasText: "Today" }).click();
+
+  // New to-dos go to the area, so they stay in view.
+  await page.locator("#quick-add input[name=title]").fill("Call client");
+  await page.locator("#quick-add input[name=title]").press("Enter");
+  await expect.poll(() => creates[0]).toMatchObject({ title: "Call client", when: "today", area: work.uuid });
+
+  await bar.getByRole("button", { name: "All" }).click();
+  await expect(page.locator(".task-title")).toContainText(["Loose today", "Fix door"]);
+});
+
 test("areas carry tags: the area header sets them, their to-dos match them in the tag bar", async ({ page }) => {
   const calls = [];
   const work = { uuid: "tag-work", title: "Work" };
