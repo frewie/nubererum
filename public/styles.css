@@ -1527,6 +1527,81 @@ body.sidebar-hidden .sidebar {
   font-size: 12px;
 }
 
+.when-palette {
+  width: min(340px, calc(100% - 32px));
+}
+
+.when-body > .palette-list {
+  max-height: none;
+  padding: 4px 6px;
+}
+
+.when-calendar {
+  padding: 2px 10px 4px;
+}
+
+.when-week,
+.when-days {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  text-align: center;
+}
+
+.when-week span {
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.when-day {
+  display: grid;
+  place-items: center;
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.when-day small {
+  font-size: 11px;
+}
+
+.when-day:hover,
+.when-day:focus-visible {
+  background: var(--selected);
+}
+
+.when-day.current {
+  background: var(--accent);
+  color: #fff;
+}
+
+.when-day .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.when-pages {
+  display: flex;
+  justify-content: space-between;
+}
+
+.when-page {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.when-none {
+  padding: 8px;
+}
+
 dialog.cheat-sheet {
   width: min(980px, calc(100% - 32px));
   max-height: calc(100vh - 64px);

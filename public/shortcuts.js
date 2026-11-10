@@ -53,7 +53,7 @@ const shortcuts = [
   { group: "Move", label: "Move item to bottom of list", keys: ["Mod+Alt+ArrowDown"], selection: 1, run: () => moveSelectedToEdge(1) },
 
   // Dates
-  { group: "When & Deadline", label: "Show When", keys: ["Mod+KeyS"], selection: 1, editorToo: true, run: () => focusEditorField(".edit-when", true) },
+  { group: "When & Deadline", label: "When…", keys: ["Mod+KeyS"], selection: true, editorToo: true, run: () => openWhen() },
   { group: "When & Deadline", label: "Start Today", keys: ["Mod+KeyT", "Alt+KeyT"], selection: true, editorToo: true, run: () => scheduleSelected({ when: "today" }) },
   { group: "When & Deadline", label: "Start This Evening", keys: ["Mod+KeyE"], selection: true, editorToo: true, run: () => scheduleSelected({ when: "evening" }) },
   { group: "When & Deadline", label: "Start Anytime", keys: ["Mod+KeyR"], selection: true, editorToo: true, run: () => scheduleSelected({ when: "anytime" }) },
@@ -476,6 +476,198 @@ function openPalette(mode) {
 
 function closePalette() {
   document.querySelector(".palette-overlay")?.remove();
+}
+
+// When… (Mod+S), as in Things: Today, This Evening, a calendar of the next
+// weeks, Someday and Clear; typing finds a day ("tom", "fri", "in 3 days",
+// "20", "nov 20", "20.11.").
+const whenWeekdays = [
+  ["sunday", "sonntag"],
+  ["monday", "montag"],
+  ["tuesday", "dienstag"],
+  ["wednesday", "mittwoch"],
+  ["thursday", "donnerstag"],
+  ["friday", "freitag"],
+  ["saturday", "samstag"],
+];
+const whenMonths = ["jan", "feb", "mar|mär", "apr", "may|mai", "jun", "jul", "aug", "sep", "oct|okt", "nov", "dec|dez"];
+
+function shortDay(date) {
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${date}T00:00:00`));
+}
+
+// dayChange is the change that starts to-dos on date.
+function dayChange(date) {
+  return date <= isoDay(new Date()) ? { when: "today" } : { startDate: date };
+}
+
+// whenMatches are the choices typing query offers, best first.
+function whenMatches(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const today = isoDay(new Date());
+  const now = new Date(`${today}T00:00:00`);
+  const fixed = [
+    { words: "today heute", title: "Today", icon: icons.today, change: { when: "today" } },
+    { words: "this evening tonight evening heute abend", title: "This Evening", icon: icons.evening, change: { when: "evening" } },
+    { words: "tomorrow morgen", title: "Tomorrow", icon: icons.upcoming, hint: shortDay(addDays(today, 1)), change: { startDate: addDays(today, 1) } },
+    { words: "next week nächste woche", title: "Next Week", icon: icons.upcoming, hint: shortDay(addDays(today, ((8 - now.getDay()) % 7) || 7)), change: { startDate: addDays(today, ((8 - now.getDay()) % 7) || 7) } },
+    { words: "someday irgendwann", title: "Someday", icon: icons.someday, change: { when: "someday" } },
+    { words: "anytime clear no date", title: "Anytime", icon: icons.anytime, change: { when: "anytime" } },
+  ];
+  const found = fixed.filter((item) => item.words.split(" ").some((word) => word.startsWith(q)) || item.words.includes(q));
+  const day = (date, title) => ({ title: title || new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(new Date(`${date}T00:00:00`)), icon: icons.upcoming, hint: shortDay(date), change: dayChange(date) });
+  whenWeekdays.forEach((names, weekday) => {
+    if (q.length >= 2 && names.some((name) => name.startsWith(q))) found.push(day(addDays(today, ((weekday - now.getDay() + 7) % 7) || 7)));
+  });
+  let match = q.match(/^in (\d{1,3}) ?(d|day|days|tag|tage|tagen|w|week|weeks|woche|wochen)?$/);
+  if (match) {
+    const days = Number(match[1]) * (/^w/.test(match[2] || "") ? 7 : 1);
+    found.push(day(addDays(today, days), `In ${match[1]} ${/^w/.test(match[2] || "") ? "weeks" : "days"}`));
+  }
+  // A day of the month, with or without month: "20", "20.11.", "nov 20", "20 nov".
+  const months = whenMonths.map((names) => `(?:${names})[a-zä]*`);
+  let dayOfMonth = 0;
+  let month = -1;
+  if ((match = q.match(/^(\d{1,2})\.?$/))) dayOfMonth = Number(match[1]);
+  else if ((match = q.match(/^(\d{1,2})\.(\d{1,2})\.?(\d{4})?$/))) [dayOfMonth, month] = [Number(match[1]), Number(match[2]) - 1];
+  else {
+    for (let i = 0; i < 12; i++) {
+      match = q.match(new RegExp(`^(?:${months[i]}) (\\d{1,2})$`)) || q.match(new RegExp(`^(\\d{1,2})\\.? (?:${months[i]})$`));
+      if (match) [dayOfMonth, month] = [Number(match[1]), i];
+    }
+  }
+  if (dayOfMonth >= 1 && dayOfMonth <= 31) {
+    for (let ahead = 0; ahead < 400; ahead++) {
+      const date = new Date(now);
+      date.setDate(now.getDate() + ahead);
+      if (date.getDate() === dayOfMonth && (month < 0 || date.getMonth() === month)) {
+        const iso = isoDay(date);
+        found.push(day(iso, iso === today ? "Today" : formatDate(iso)));
+        break;
+      }
+    }
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(q) && q >= today) found.push(day(q, formatDate(q)));
+  return found;
+}
+
+function openWhen() {
+  const uuids = targetUUIDs();
+  if (!uuids.length) return;
+  closePalette();
+  const task = findTask(uuids[0]);
+  const current = uuids.length === 1 && task ? whenOf(task) : "";
+  const currentDate = current === "date" ? task.scheduledDate : "";
+  const today = isoDay(new Date());
+  const start = new Date(`${today}T00:00:00`);
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+  let page = 0;
+  let active = 0;
+  let shown = [];
+  const overlay = document.createElement("div");
+  overlay.className = "palette-overlay";
+  overlay.innerHTML = `
+    <div class="palette when-palette" role="dialog" aria-label="When">
+      <input class="palette-input" placeholder="When" aria-label="When: type a day" />
+      <div class="when-body"></div>
+    </div>`;
+  document.body.append(overlay);
+  const input = overlay.querySelector(".palette-input");
+  const body = overlay.querySelector(".when-body");
+  const option = (item, i) => `<button type="button" class="palette-item${i === active ? " active" : ""}" data-index="${i}" role="option">
+      <span class="nav-icon">${item.icon || ""}</span><span class="mini-title">${escapeHtml(item.title)}</span><span class="palette-hint">${item.checked ? "✓" : escapeHtml(item.hint || "")}</span>
+    </button>`;
+  const calendar = () => {
+    const first = new Date(start);
+    first.setDate(first.getDate() + page * 28);
+    const days = [];
+    for (let i = 0; i < 28; i++) {
+      const date = new Date(first);
+      date.setDate(first.getDate() + i);
+      const iso = isoDay(date);
+      const label = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(date);
+      if (iso < today) days.push(`<span class="when-day past"></span>`);
+      else
+        days.push(
+          `<button type="button" class="when-day${iso === today ? " today" : ""}${iso === currentDate ? " current" : ""}" data-day="${iso}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${iso === today ? icons.today : date.getDate() === 1 ? `<small>${escapeHtml(new Intl.DateTimeFormat(undefined, { month: "short" }).format(date))}</small>` : date.getDate()}</button>`,
+        );
+    }
+    const names = [1, 2, 3, 4, 5, 6, 0].map((weekday) => new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(new Date(2026, 1, weekday + 1)));
+    return `<div class="when-calendar">
+        <div class="when-week">${names.map((name) => `<span>${escapeHtml(name)}</span>`).join("")}</div>
+        <div class="when-days">${days.join("")}</div>
+        <div class="when-pages">${page ? `<button type="button" class="when-page" data-page="-1" aria-label="Earlier weeks">‹</button>` : "<span></span>"}<button type="button" class="when-page" data-page="1" aria-label="Later weeks">›</button></div>
+      </div>`;
+  };
+  const draw = () => {
+    const query = input.value;
+    if (query.trim()) {
+      shown = whenMatches(query);
+      active = Math.min(active, Math.max(0, shown.length - 1));
+      body.innerHTML = `<div class="palette-list" role="listbox">${shown.length ? shown.map(option).join("") : `<div class="palette-hint when-none">No match</div>`}</div>`;
+      return;
+    }
+    const top = [
+      { title: "Today", icon: icons.today, change: { when: "today" }, checked: current === "today" },
+      { title: "This Evening", icon: icons.evening, change: { when: "evening" }, checked: current === "evening" },
+    ];
+    const bottom = [
+      { title: "Someday", icon: icons.someday, change: { when: "someday" }, checked: current === "someday" },
+      { title: "Clear", icon: "", change: { when: "anytime" }, clear: true },
+    ];
+    shown = [...top, ...bottom];
+    active = Math.min(active, shown.length - 1);
+    body.innerHTML = `<div class="palette-list" role="listbox">${top.map(option).join("")}</div>${calendar()}<div class="palette-list" role="listbox">${bottom.map((item, i) => option(item, i + top.length)).join("")}</div>`;
+  };
+  const choose = (change) => {
+    closePalette();
+    if (!change) return;
+    scheduleTasks(uuids, change).then(() => {
+      if (state.editing) refreshEditorFooter(state.editing);
+    });
+    const label = change.startDate ? formatDate(change.startDate) : { today: "Today", evening: "This Evening", anytime: "Anytime", someday: "Someday" }[change.when];
+    toast(uuids.length === 1 ? `“${findTask(uuids[0])?.title}” → ${label}` : `${uuids.length} to-dos → ${label}`, "success");
+  };
+  input.addEventListener("input", () => {
+    active = 0;
+    draw();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      active = (active + (event.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length);
+      draw();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      choose(shown[active]?.change);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closePalette();
+    }
+  });
+  body.addEventListener("click", (event) => {
+    const pager = event.target.closest("[data-page]");
+    if (pager) {
+      page = Math.max(0, page + Number(pager.dataset.page));
+      draw();
+      input.focus();
+      return;
+    }
+    const dayButton = event.target.closest("[data-day]");
+    if (dayButton) {
+      choose(dayChange(dayButton.dataset.day));
+      return;
+    }
+    const button = event.target.closest(".palette-item");
+    if (button) choose(shown[Number(button.dataset.index)]?.change);
+  });
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closePalette();
+  });
+  draw();
+  input.focus();
 }
 
 // Cheat sheet of all shortcuts, generated from the list above.
