@@ -11,6 +11,6 @@
     "screenshot": "SCREENSHOT=1 playwright test tests/screenshot.spec.js"
   },
   "devDependencies": {
-    "@playwright/test": "1.64.1"
+    "@playwright/test": "1.65.0"
   }
 }
